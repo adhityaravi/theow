@@ -43,7 +43,7 @@ sequenceDiagram
     CH-->>TH: Top K candidates
 
     loop For each candidate
-        TH->>TH: Validate when: facts (regex, problem_type)
+        TH->>TH: Validate when: facts
         TH->>AR: Call registered action
         TH->>SD: Retry function
     end
@@ -77,8 +77,8 @@ def pin_dependency(module, version, workspace):
     subprocess.run(["go", "get", f"{module}@{version}"], cwd=workspace)
 
 @theow.mark(
-    problem_type="dep_expansion",
-    facts_from=lambda tree, ob: {
+    context_from=lambda tree, ob, exc: {
+        "problem_type": "dep_expansion",
         "package": tree.package,
         "go_mod": read_go_mod(tree),
         "stderr": ob.last_stderr,
@@ -126,8 +126,8 @@ def run_sourcecraft_test(workspace: str) -> dict:
     }
 
 @theow.mark(
-    problem_type="test_failure",
-    facts_from=lambda tree, ob: {
+    context_from=lambda tree, ob, exc: {
+        "problem_type": "test_failure",
         "package": tree.package,
         "source_files": list_go_files(tree),
         "go_version": get_go_version(tree),
@@ -162,7 +162,7 @@ when:
   - fact: problem_type
     equals: test_failure
   - fact: stderr
-    contains: "go: go.mod requires go >="
+    regex: 'go: go.mod requires go >= (?P<go_version>\S+)'
     examples:
       - "go: go.mod requires go >= 1.21 (running go 1.25)"
       - "go: go.mod requires go >= 1.18.0 (running go 1.25)"
@@ -170,7 +170,7 @@ when:
 then:
   - action: patch_spread_go_version
     params:
-      go_version: "{extract.1}"
+      go_version: "{go_version}"
 ```
 
 ```yaml
@@ -208,7 +208,7 @@ when:
   - fact: problem_type
     equals: dep_expansion
   - fact: stderr
-    regex: 'module declares its path as: (\S+)\s+but was required as: (\S+)'
+    regex: 'module declares its path as: (?P<new_path>\S+)\s+but was required as: (?P<old_path>\S+)'
     examples:
       - |
         github.com/imdario/mergo@v1.0.2: parsing go.mod:
@@ -222,8 +222,8 @@ when:
 then:
   - action: fix_go_mod_replace
     params:
-      new_path: "{extract.1}"
-      old_path: "{extract.2}"
+      new_path: "{new_path}"
+      old_path: "{old_path}"
 ```
 
 ```yaml
@@ -237,8 +237,10 @@ tags: [go, dep_expansion, silent_failure, manual]
 when:
   - fact: problem_type
     equals: dep_expansion
-  - fact: leaf_status
-    condition: "marked_leaf AND go_mod_has_requires"
+  - fact: marked_leaf
+    equals: "true"
+  - fact: go_mod_has_requires
+    equals: "true"
 
 then:
   - action: rerun_dep_expansion
@@ -248,7 +250,7 @@ then:
 
 ## 5. Exploration Mode
 
-The `@theow.mark(explorable=True)` decorators are already on `dep_expand` and `run_tests`. Exploration is just running the normal pipeline with `THEOW_EXPLORE=1`.
+The `@theow.mark(explorable=True)` decorator is on `run_tests`. `dep_expand` uses `explorable=False` (default) since dep expansion failures are more structured and better served by deterministic rules. Exploration is just running the normal pipeline with `THEOW_EXPLORE=1`.
 
 ### The Exploration Script
 
@@ -269,13 +271,13 @@ for pkg in failures:
     )
 ```
 
-That's it. No separate explore calls. No manual fact building. No reproduction logic. The decorator catches the failure, has the full exception and facts, runs the LLM with all registered tools, caches similar errors via the session cache, and respects `session_limit`.
+That's it. No separate explore calls. No manual context building. No reproduction logic. The decorator catches the failure, has the full exception and context, runs the LLM with all registered tools, caches similar errors via the session cache, and respects `session_limit`.
 
 ```mermaid
 sequenceDiagram
     participant S as Exploration Script
     participant J as just onboard
-    participant F as dep_expand / run_tests
+    participant F as run_tests
     participant T as @theow.mark
     participant L as LLM
 
@@ -288,7 +290,7 @@ sequenceDiagram
         T->>T: Try rules (same as normal)
         T->>T: No rules match
         T->>T: Check session cache
-        T->>L: Explore with auto-captured facts + tools (on cache miss)
+        T->>L: Explore with auto-captured context + tools (on cache miss)
         L-->>T: Proposed Rule
         T->>T: Cache result
         T->>T: Save proposed Rule to .theow/rules/
@@ -297,7 +299,7 @@ sequenceDiagram
 
 ### What Happens to Proposed Rules
 
-The exploration run produces `.rule.yaml` files in `.theow/rules/` tagged `auto`. The team reviews them:
+The exploration run produces `.rule.yaml` files in `.theow/rules/` with an `auto` tag. The team reviews them:
 
 - Good rule? Keep it. Next pipeline run, the Resolver picks it up.
 - Bad rule? Delete it. The explorer will try something different next time.
@@ -306,7 +308,7 @@ The exploration run produces `.rule.yaml` files in `.theow/rules/` tagged `auto`
 ### Normal Pipeline Run vs Exploration Run
 
 ```bash
-# Normal: resolve only, no LLM, safe
+# Normal: resolve only, no exploration, safe
 just onboard go
 
 # Exploration: resolve first, LLM fallback for unmatched failures

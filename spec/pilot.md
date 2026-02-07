@@ -40,8 +40,8 @@ flowchart LR
 
 Two modes of operation:
 
-- **Resolution mode** where `@theow.mark()` or `theow.resolve()` matches rules and acts on them. No LLM. Fast, free.
-- **Exploration mode** where `@theow.mark(explorable=True)` with `THEOW_EXPLORE=1` or `theow.explore()` uses LLM to investigate novel situations. Produces a rule AND the action code to execute it. Expensive, last resort.
+- **Resolution mode** where `@theow.mark()` or `theow.resolve()` matches rules and acts on them. Deterministic rules call actions directly (no LLM). Probabilistic rules hand off to the LLM (fire-and-forget, no persistence). Fast for known problems.
+- **Exploration mode** where `@theow.mark(explorable=True)` with `THEOW_EXPLORE=1` or `theow.explore()` uses LLM to investigate novel situations. Produces new deterministic rules and action code. Expensive, last resort.
 
 ---
 
@@ -58,13 +58,11 @@ from theow import Theow, Rule, Fact, Action, LLMConfig
 | `@theow.action()` | Decorator | Register a callable for rules to reference |
 | `@theow.mark()` | Decorator | Resolve, explore, retry |
 | `theow.resolve()` | Method | Match rules. Returns `Rule` |
-| `theow.explore()` | Method | LLM investigation. Returns `ExploreResult` |
+| `theow.explore()` | Method | LLM investigation. Returns `Rule` |
 | `theow.meow()` | Method | Stats 🐱 |
 | `Rule` | Data | when (Facts) + then (Actions) + metadata |
 | `Fact` | Data | A condition in `when:` |
 | `Action` | Data | A step in `then:` |
-| `ExploreResult` | Data | Rule + list of ProposedAction diffs |
-| `ProposedAction` | Data | Unified diff for a new or modified action |
 
 ### 3.1 The Engine
 
@@ -100,7 +98,7 @@ def run_command(cmd: str, cwd: str) -> dict:
     return {"returncode": result.returncode, "stderr": result.stderr.decode()}
 ```
 
-Theow ships base tool classes (`BaseFileReader`, `BaseCommandRunner`, `BaseTempDir`) that consumers can extend or use directly.
+The decorator is just registration. It puts the callable in a registry for the LLM gateway.
 
 ### 3.3 Action Registration
 
@@ -155,8 +153,8 @@ The decorator. Marks a function as Theow-managed. Handles resolution, exploratio
 
 ```python
 @theow.mark(
-    problem_type="build_failure",
-    facts_from=lambda x: {
+    context_from=lambda x, exc: {
+        "problem_type": "build_failure",
         "stderr": x.stderr,
         "config": read_config(x),
     },
@@ -174,13 +172,14 @@ def my_build_step(x):
 
 | Param | Purpose |
 |---|---|
-| `problem_type` | Categorizes the situation for Chroma search |
-| `facts_from` | Lambda that extracts facts from the function's args |
+| `context_from` | Callable that builds the context dict. Receives the function's original args/kwargs plus the caught exception as the last argument. Runs after the function fails. |
 | `max_retries` | How many different rules to try before giving up |
 | `rules` | Optional. Try these named rules first, in order |
 | `tags` | Optional. Try rules with matching tags next |
 | `fallback` | If explicit rules and tags fail, fall back to vector search |
 | `explorable` | If True and `THEOW_EXPLORE=1` is set in environment, explore via LLM when all rules are exhausted. Default False |
+
+**Auto-captured tracing:** On exploration, Theow always captures the full traceback (`traceback.format_exc()`), exception type and message, and Python logging output (via a temporary handler on the root logger during execution). These are injected into the LLM prompt alongside the consumer's context. The consumer builds domain context (stderr, config, package name). Theow handles Python-level tracing. Neither duplicates the other.
 
 **Resolution path** (always active):
 
@@ -192,7 +191,7 @@ sequenceDiagram
     participant A as Action Registry
     
     F->>F: Execute
-    F-->>T: Failure + facts (auto-captured)
+    F-->>T: Failure + context (auto-captured)
     
     T->>T: Try named rules (if specified)
     T->>C: Filter by tags (if specified)
@@ -221,19 +220,19 @@ sequenceDiagram
     T->>SC: Similar situation explored this session?
     SC-->>T: Cache hit or miss
     
-    T->>L: Facts + exception + traceback + tool declarations
+    T->>L: Context + exception + traceback + tool declarations
     loop LLM drives investigation
         L->>Tools: function calls
         Tools-->>L: results
     end
-    L-->>T: ExploreResult (Rule + action diffs)
+    L-->>T: Rule (validated)
     
     T->>SC: Cache result
     T->>F: Act and retry
     T-->>F: Result or final failure
 ```
 
-When `explorable=True`, the decorator auto-captures the exception, traceback, and facts from the failed function call.
+When `explorable=True`, the decorator auto-captures the exception, traceback, and log output from the failed function call. These go to the LLM alongside the consumer's context.
 
 However, `explorable=True` alone does not activate exploration. The environment variable `THEOW_EXPLORE=1` must also be set. Both gates must be open:
 
@@ -241,7 +240,7 @@ However, `explorable=True` alone does not activate exploration. The environment 
 - `THEOW_EXPLORE=1` in the environment (runtime activation)
 
 ```bash
-# Normal pipeline run: resolve only, no LLM, even with explorable=True in code
+# Normal pipeline run: resolve only, no exploration
 just onboard go --single-pkg="github.com/some/pkg"
 
 # Exploration run: both gates open
@@ -250,7 +249,7 @@ THEOW_EXPLORE=1 just onboard go --single-pkg="github.com/some/pkg" --from=9 --un
 
 `session_limit` acts as a third safety net, capping total LLM calls per session.
 
-When `explorable=False` (default), Theow only tries rules. No LLM calls regardless of environment. Safe for production pipelines.
+When `explorable=False` (default), Theow only tries rules — no exploration, no new rules produced. Deterministic rules run without LLM. Probabilistic rules still hand off to the LLM if matched, but nothing is persisted.
 
 ### 3.5 Resolve (Direct Call)
 
@@ -258,8 +257,7 @@ Match rules without the decorator. Returns a `Rule` with resolved params. Consum
 
 ```python
 rule = theow.resolve(
-    problem_type="build_failure",
-    facts={"stderr": stderr, "config": config_contents},
+    context={"problem_type": "build_failure", "stderr": stderr, "config": config_contents},
 )
 
 if rule:
@@ -271,30 +269,25 @@ if rule:
 
 ### 3.6 Explore (Direct Call)
 
-LLM investigation without the decorator. For batch exploration of historical situations, cross-system debugging, or interactive use. Takes an explicit list of tools (unlike `@theow.mark()` which uses all registered tools). Returns an `ExploreResult`.
+LLM investigation without the decorator. For batch exploration of historical situations, cross-system debugging, or interactive use. Takes an explicit list of tools (unlike `@theow.mark()` which uses all registered tools). Returns a `Rule`.
 
 ```python
-result = theow.explore(
-    facts={
+rule = theow.explore(
+    context={
         "problem": "build fails with error X",
         "stderr": stderr_output,
     },
     tools=[read_file, write_file, run_command, dep_resolve, run_pipeline],
 )
 
-if result:
-    # Review what the LLM proposed
-    print(result.rule.to_yaml())
-    for action in result.actions:
-        print(action.preview())     # shows unified diffs
-    
-    # Apply diffs and write rule
-    result.save()
+if rule:
+    print(rule.to_yaml())
+    rule.act()
 ```
 
 The consumer can register any combination of tools. The LLM receives all of them as function declarations and drives the investigation. Theow orchestrates the tool-calling loop.
 
-The resolution happens during exploration (the LLM calls tools to handle the situation live). The `ExploreResult` captures the knowledge for future use: a rule for matching and action diffs for the code.
+The fix happens during exploration (the LLM calls tools to handle the situation live). The rule YAML and action files are written to `.theow/` for future use.
 
 Use `theow.explore()` when there is no function to decorate: batch processing historical situations from a database, investigating cross-system issues like Kubernetes pod crashes, or interactive debugging in a REPL.
 
@@ -348,7 +341,7 @@ class Rule:
 
     # Production rule: when facts match, then act
     when: list[Fact]
-    then: list[Action]
+    then: list[Action] = field(default_factory=list)  # empty for probabilistic rules
 
     # Classification
     tags: list[str] = field(default_factory=list)
@@ -379,14 +372,13 @@ class Fact:
     equals: str | None = None
     contains: str | None = None
     regex: str | None = None
-    condition: Callable | None = None
     examples: list[str] = field(default_factory=list)  # optional, vector search fuel
     # Multiple facts in when: are ANDed. All must match.
 
 @dataclass
 class Action:
     action: str         # name of a registered @theow.action() callable
-    params: dict        # can reference {extract.N} for regex captures
+    params: dict        # {name} from regex captures, {key} from context dict
     # Actions in then: execute sequentially, top to bottom.
 
 @dataclass
@@ -395,35 +387,9 @@ class LLMConfig:
     tools: list[str]
     constraints: dict
     use_secondary: bool = False
-
-@dataclass
-class ProposedAction:
-    name: str               # "fix_module_rename"
-    description: str        # one-liner for review
-    diff: str               # unified diff format
-    target_file: str        # path relative to repo root
-    
-    def apply(self, cwd: str = "."):
-        """Apply the diff using patch."""
-        subprocess.run(["patch", "-p1"], input=self.diff.encode(), cwd=cwd)
-    
-    def preview(self) -> str:
-        """Print the diff for review."""
-        return self.diff
-
-@dataclass
-class ExploreResult:
-    rule: Rule                        # proposed rule (immutable, written once)
-    actions: list[ProposedAction]     # new/modified actions (mutable, as diffs)
-    
-    def save(self, cwd: str = "."):
-        """Write rule YAML and apply all action diffs."""
-        self.rule.to_yaml(f"{cwd}/.theow/rules/")
-        for action in self.actions:
-            action.apply(cwd)
 ```
 
-`resolve()` returns a `Rule`. `explore()` returns an `ExploreResult`. The Rule is the same dataclass in both cases, but when returned from `resolve()` the params are already resolved with regex captures filled in.
+`resolve()` and `explore()` both return a `Rule`. When returned from `resolve()`, params are already resolved — named regex captures from `when:` facts and values from the context dict are interpolated into `then:` action params. When returned from `explore()`, the rule has been structurally validated (parse, match, actions exist). Through `@theow.mark()`, the rule is also tested by retrying the original function (see §6 Validation).
 
 `success_count` and `fail_count` are tracked in Chroma metadata. `theow.meow()` surfaces them.
 
@@ -444,20 +410,50 @@ llm_config:
   tools: [read_file, run_command, dep_resolve]
 ```
 
+### Context
+
+Context is the single input to the resolution and exploration pipeline. It's a flat dict returned by `context_from` (or passed directly to `resolve()`/`explore()`). It serves three purposes:
+
+1. **Metadata filter** — context keys matching known Chroma metadata fields become `where` filters
+2. **Semantic query** — the longest string value becomes the vector search query
+3. **Param resolution** — all context values (plus regex captures) are available for `then:` action params
+
+Theow determines the roles automatically. On startup, it scans all indexed rules and collects keys from `when:` facts that use `equals` — these become the set of known metadata keys. At query time:
+
+```python
+# Theow internally:
+context = {"problem_type": "dep_expansion", "stderr": "module declares...", "workspace": "/tmp/..."}
+
+# 1. Metadata filter: context keys that match known metadata fields
+where = {"problem_type": "dep_expansion"}
+
+# 2. Semantic query: longest string value from the rest
+query_text = "module declares its path as: dario.cat/mergo but was required as: ..."
+
+# 3. Chroma query
+results = collection.query(query_texts=[query_text], where=where, n_results=K)
+```
+
+Chroma pre-filters by metadata, then runs vector similarity on the filtered set. One call.
+
+The embedding model (`all-MiniLM-L6-v2`) truncates at 256 tokens and performs best with shorter inputs (trained on 128-token sequences). Using only the longest string value — typically stderr — keeps queries focused and within the model's sweet spot.
+
 ### Chroma Embedding Strategy
 
-Each rule is embedded as `description` + all `examples` from its facts, concatenated. The description gives conceptual context ("module URL rename causes build failure") while fact examples give literal context (actual stderr snippets). At match time, the incoming facts are semantically closer to the examples than to the description alone. Combining both improves recall.
+**Storage (rule indexing at startup):** Each rule is embedded as `description` + all `examples` from its facts, concatenated. The description gives conceptual context ("module URL rename causes build failure") while fact examples give literal context (actual stderr snippets). `when:` facts with `equals` are stored as Chroma metadata for filtering.
 
-Example:
+Example embedded text:
 
 ```
-Embedded text: "Module had a URL rename. Build fails because the required
+"Module had a URL rename. Build fails because the required
 path doesn't match the module's declared path. ||| github.com/imdario/mergo@v1.0.2:
 parsing go.mod: module declares its path as: dario.cat/mergo but was required
 as: github.com/imdario/mergo"
 ```
 
 2 to 5 examples per fact. Not enough to introduce noise. Enough to improve recall.
+
+**Query (at resolve time):** Longest string value from context (after extracting metadata filters). Chroma compares this against the stored `description + examples` embeddings.
 
 ### YAML Representation
 
@@ -474,7 +470,7 @@ when:
   - fact: problem_type
     equals: dep_resolution
   - fact: stderr
-    regex: 'declares its path as: (\S+)\s+but was required as: (\S+)'
+    regex: 'declares its path as: (?P<new_path>\S+)\s+but was required as: (?P<old_path>\S+)'
     examples:
       - |
         github.com/imdario/mergo@v1.0.2: parsing go.mod:
@@ -488,8 +484,8 @@ when:
 then:
   - action: fix_path_rename
     params:
-      new_path: "{extract.1}"
-      old_path: "{extract.2}"
+      new_path: "{new_path}"
+      old_path: "{old_path}"
 ```
 
 #### Probabilistic Rule
@@ -514,27 +510,26 @@ llm_config:
   use_secondary: true
 ```
 
-### Two-Phase Matching
+### Three-Phase Matching
 
 ```mermaid
 flowchart LR
-    P[Facts] --> V["Vector search on<br>description + fact examples"]
+    P[Context] --> MF["Metadata pre-filter<br>(equals facts as where clause)"]
+    MF --> V["Vector search on<br>description + fact examples"]
     V --> K[Top K candidates]
     K --> S{Structured validation}
     S -->|regex matches| HIT[Rule matched]
-    S -->|problem_type matches| HIT
-    S -->|condition passes| HIT
+    S -->|equals/contains matches| HIT
     S -->|validation fails| NEXT[Next candidate]
 ```
 
-1. **Vector search** on the combined `description + fact examples` embedding finds semantically similar rules
-2. **Structured validation** on `when:` facts confirms the rule actually applies
-
-Rules can rely on a good description (vector search finds them), strict regex (precise matching), or both.
+1. **Metadata pre-filter** narrows Chroma to rules matching context keys that correspond to known metadata fields (see Context section above)
+2. **Vector search** on the filtered set finds semantically similar rules
+3. **Structured validation** on `when:` facts confirms the rule actually applies
 
 ### Chroma Collection
 
-Single collection. The derived `type` property in rule metadata distinguishes deterministic from probabilistic.
+Single collection. Rule metadata includes: `type` (deterministic/probabilistic), content hash, success/fail counts, and all `equals` fact values (for metadata filtering).
 
 ### Indexing
 
@@ -561,11 +556,13 @@ At resolve time, Chroma returns rule hits. At explore time, Chroma also returns 
 
 ## 5. The Resolver
 
-The deterministic path. Known situations, known actions. No LLM.
+The rule matching path. Known situations, known responses.
+
+Deterministic rules (with `then:` actions) execute without LLM. Probabilistic rules (with `llm_config`) hand off to the LLM gateway — the LLM runs with the rule's prompt and tools, applies whatever fix it finds, but **nothing is persisted**. No new rules, no new actions. It's a fire-and-forget LLM call for long-tail problems that aren't worth codifying. Through `@theow.mark()`, the result is validated by retrying the original function.
 
 ```mermaid
 flowchart TD
-    P[Facts] --> E{Explicit rules?}
+    P[Context] --> E{Explicit rules?}
     E -->|Yes| T1[Try each named rule in order]
     E -->|No| TG{Tags specified?}
     T1 -->|None worked| TG
@@ -574,9 +571,10 @@ flowchart TD
     T2 -->|None worked + fallback| VS
     VS --> K[Top K similar rules]
     K --> V[Validate when: facts]
-    V -->|Match| EX[Extract params via regex]
-    EX --> A[Call registered action]
-    A --> ACT[Return Rule]
+    V -->|Match + deterministic| EX[Extract params, call action]
+    V -->|Match + probabilistic| LLM[LLM fire-and-forget]
+    EX --> ACT[Return Rule]
+    LLM --> ACT
     V -->|No match| NEXT[Next candidate]
     NEXT -->|Exhausted| FAIL[No match found]
 ```
@@ -585,27 +583,27 @@ flowchart TD
 
 ## 6. The Explorer
 
-The probabilistic path. LLM with tool calling for novel situations.
+The knowledge acquisition path. LLM with tool calling for novel situations. Unlike probabilistic rules (which use the LLM but don't learn), the Explorer's job is to produce new deterministic rules and actions that persist.
 
 ### Session Cache
 
-When `explore()` is called in a loop, many situations may share the same root cause. Theow deduplicates using a session cache: an in-memory list of `(embedding, ExploreResult)` pairs on the Theow instance.
+When `explore()` is called in a loop, many situations may share the same root cause. Theow deduplicates using a session cache: an in-memory list of `(embedding, Rule)` pairs on the Theow instance.
 
 ```mermaid
 flowchart TD
-    E[explore called] --> EM[Embed facts]
+    E[explore called] --> EM[Embed context]
     EM --> SC{Session cache:<br>similar situation seen?}
-    SC -->|Yes| R[Return cached ExploreResult]
+    SC -->|Yes| R[Return cached Rule]
     SC -->|No| CH{Chroma:<br>persisted rule matches?}
-    CH -->|Yes| R2[Return matched ExploreResult]
+    CH -->|Yes| R2[Return matched Rule]
     CH -->|No| LLM[Run LLM exploration]
-    LLM --> CACHE[Store embedding + ExploreResult in session cache]
-    CACHE --> R3[Return new ExploreResult]
+    LLM --> CACHE[Store embedding + Rule in session cache]
+    CACHE --> R3[Return new Rule]
 ```
 
 First time Theow sees "module declares its path as X but was required as Y" it runs the full LLM exploration. The next 49 times it sees similar stderr, it returns the cached result without calling the LLM.
 
-The session cache lives on the Theow instance. When the instance dies, cache is gone. Only rules the consumer explicitly saves to `rules/` persist across sessions.
+The session cache lives on the Theow instance. When the instance dies, cache is gone. Rules written to `rules/` by the Explorer persist across sessions and are indexed into Chroma on next startup.
 
 ### Session Limit
 
@@ -615,73 +613,57 @@ The session cache lives on the Theow instance. When the instance dies, cache is 
 
 After session cache and Chroma miss (see flowchart above):
 
-1. Builds an LLM tool-calling session with the consumer's tools as function declarations and budget constraints
-2. LLM drives the investigation within one API session (no oscillation)
-3. LLM produces two outputs: a rule (when does this situation apply) and action diffs (what to do about it)
-4. Caches the result, returns an `ExploreResult`
+1. Theow builds an LLM tool-calling session with the consumer's tools plus a built-in `done` tool
+2. LLM investigates and fixes the problem using tools
+3. LLM reads existing rules and actions to learn the format, then writes a new `.rule.yaml` and action `.py` to `.theow/`
+4. LLM calls `done(rule_file="...")`
+5. Theow validates the proposed rule (see Validation below)
+6. If validation fails, error goes back to the LLM in the same session for revision
+7. If validation passes, Theow caches and returns the `Rule`
+
+### The `done` Tool
+
+Theow injects a `done` tool into every exploration session alongside the consumer's tools:
+
+```python
+# Theow injects this automatically
+@theow.tool()
+def done(rule_file: str) -> dict:
+    """Signal that investigation is complete.
+    Provide the path to the rule file you created."""
+    return {"status": "done"}
+```
+
+### Validation
+
+After the LLM calls `done`, Theow validates the proposed rule within the same session:
+
+1. **Parse** — is the YAML valid? Does it deserialize into a `Rule`?
+2. **Match** — do the `when:` facts match the current context?
+3. **Actions** — are the referenced actions registered (existing or newly written)?
+4. **Test** — retry the original function with the fix applied. Does it work?
+
+Step 4 only applies when exploration runs through `@theow.mark()`, which has the original function. For direct `theow.explore()` calls, there is no function to retry — validation stops after step 3.
+
+If any step fails, Theow sends the error back to the LLM in the same session. The LLM has full conversation history and can revise. This loop repeats until validation passes or the budget is exhausted.
 
 ### Explorer Output
 
-The Explorer returns an `ExploreResult` (see §4 Data Models), not a `Rule`. This keeps the Rule clean. The Explorer searches Chroma for existing actions before proposing new ones. It can:
-
-- **Reuse** existing actions by referencing them in the rule
-- **Compose** multiple existing actions in sequence
-- **Modify** an existing action to handle a new edge case (diff against existing file)
-- **Create** a new action when nothing fits (diff against `/dev/null`)
-
-Only new or modified actions appear in `result.actions`. Reused actions are just referenced by name in the rule.
-
-Example output for a new action:
+`explore()` returns a `Rule`, same as `resolve()`. The rule YAML and action files are on disk in `.theow/`. The consumer's exploration script can commit them, open a PR, or delete them.
 
 ```python
-result = theow.explore(facts={...}, tools=[...])
+# Direct call — structurally validated (parse, match, actions exist)
+rule = theow.explore(context={...}, tools=[...])
 
-result.rule.to_yaml()
-# name: module_path_rename
-# when:
-#   - fact: stderr
-#     regex: 'declares its path as: ...'
-# then:
-#   - action: fix_module_rename
-#     params:
-#       old_path: "{extract.2}"
-#       new_path: "{extract.1}"
-
-result.actions[0].preview()
-# --- /dev/null
-# +++ .theow/actions/fix_module_rename.py
-# @@ -0,0 +1,18 @@
-# +from theow import action
-# +import subprocess
-# +
-# +@action("fix_module_rename")
-# +def fix_module_rename(workspace: str, old_path: str, new_path: str) -> dict:
-# +    ...
-
-result.save()  # writes rule YAML, applies diffs
-```
-
-Example output extending an existing action:
-
-```python
-result.actions[0].preview()
-# --- .theow/actions/fix_go_mod_replace.py
-# +++ .theow/actions/fix_go_mod_replace.py
-# @@ -12,6 +12,12 @@
-#      latest = versions[-1]
-#  
-# +    # Handle case where latest is incompatible
-# +    result = subprocess.run(
-# +        ["go", "mod", "tidy", "-e"],
-# +        cwd=workspace, capture_output=True
-# +    )
-# +    if result.returncode != 0:
-# +        latest = versions[-2] if len(versions) > 1 else latest
+# Through decorator — fully validated (structural + retry confirms the fix works)
+@theow.mark(explorable=True, context_from=lambda x, exc: {...})
+def my_step(x):
+    ...
 ```
 
 ### Tool Execution
 
-Tool functions run in the consumer's process as callbacks. The consumer controls what tools do. Theow orchestrates the LLM to tool loop.
+Tool functions run in the consumer's process as callbacks. The consumer controls what tools do. Theow orchestrates the LLM-to-tool loop.
 
 ### Budget Controls
 
@@ -697,10 +679,10 @@ Usage tracking and consumer curation.
 
 ```mermaid
 flowchart LR
-    EX["explore() returns<br>ExploreResult"] --> C{Consumer reviews diffs}
-    C -->|Approve| D["result.save()<br>applies diffs + writes rule"]
-    C -->|Discard| X[Gone]
-    D --> CH[Chroma indexes rule + actions]
+    EX["explore() returns Rule"] --> C{Consumer reviews files}
+    C -->|Approve| D[Commit rule + actions]
+    C -->|Discard| X[Delete files]
+    D --> CH[Chroma indexes on next startup]
     CH --> R["resolve() finds rule"]
     R -->|Works| S["success_count++"]
     R -->|Fails| F["fail_count++"]
@@ -709,13 +691,12 @@ flowchart LR
 
 ### How It Works
 
-1. `explore()` returns an `ExploreResult` with a Rule and a list of ProposedActions (as diffs)
-2. Consumer reviews the rule and action diffs (or consumer's exploration script opens a PR)
-3. `result.save()` writes the rule YAML and applies the diffs via `patch -p1`
-4. Theow indexes the rule and actions into Chroma on next startup
-5. `resolve()` finds the rule via vector search when a similar situation comes in
-6. The rule references actions by name, Theow calls them
-7. Success and fail counts tracked in Chroma metadata, surfaced via `theow.meow()`
+1. `explore()` writes rule YAML and action files to `.theow/`, returns a `Rule`
+2. Consumer reviews the files (or consumer's exploration script opens a PR)
+3. On next startup, Theow indexes the new rule and actions into Chroma
+4. `resolve()` finds the rule via vector search when a similar situation comes in
+5. The rule references actions by name, Theow calls them
+6. Success and fail counts tracked in Chroma metadata, surfaced via `theow.meow()`
 
 ### Mutability Boundary
 
@@ -723,11 +704,11 @@ Rules and tools are immutable. Actions are mutable.
 
 - **Rules** are written once by the Explorer or a human. They define when a rule applies (`when:` conditions) and which actions to call (`then:`). The LLM proposes new rules but never modifies existing ones. If a rule needs changing, a human changes it. This prevents silent match regressions (e.g. a broadened regex matching situations it shouldn't).
 - **Tools** are registered by the consumer. The LLM calls them during exploration but cannot modify them. They define what the LLM can do.
-- **Actions** are mutable. The LLM can create new actions, modify existing ones, or compose them. This is why the Explorer outputs diffs for actions but complete YAML for rules.
+- **Actions** are mutable. The LLM can create new actions or modify existing ones. The LLM writes action files directly during exploration.
 
 ### What Theow Does NOT Do
 
-Theow never commits files on its own. It never decides which rules to keep or discard. It never modifies existing rules. It proposes new rules, proposes action diffs, and tracks success/fail counts. The consumer curates.
+Theow never commits files on its own. It never decides which rules to keep or discard. It never modifies existing rules. It writes proposed rules and actions to disk during exploration and tracks success/fail counts. The consumer curates.
 
 Consumer runs `theow.meow()`, sees a rule struggling (3s / 11f), and decides: fix the action code, rewrite the rule, remove both, or let the explorer try something different next time.
 
@@ -779,7 +760,7 @@ The `provider/model` string in the `Theow` constructor routes to the right gatew
 - `anthropic/claude-sonnet-4-20250514` would instantiate `AnthropicGateway` (when implemented)
 - `ollama/qwen2.5-coder` would instantiate `OllamaGateway` (when implemented)
 
-Two methods. `tool_session` for the Explorer's tool-calling loop. `generate` for when the Resolver needs a single LLM call (e.g. adapting a similar solution).
+Two methods. `tool_session` for the Explorer's tool-calling loop. `generate` for probabilistic rules matched by the Resolver (single LLM call, no persistence).
 
 ---
 
