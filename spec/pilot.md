@@ -1,4 +1,4 @@
-# Theow — Framework Specification
+# Theow: Framework Specification
 
 > **Theow** (Old English: þeow, "bound servant")
 >
@@ -140,7 +140,7 @@ Theow auto-discovers actions in `.theow/actions/*.py` on startup and registers t
 
 Actions should be pure functions: inputs in, subprocess calls or file operations, result out. No classes, no state. This makes them easy to review, test, and throw away.
 
-Actions are indexed in Chroma alongside rules. The Explorer searches available actions before proposing new ones (see §6 The Explorer).
+Actions are indexed in Chroma alongside rules. The Explorer can search existing actions via built-in tools (`search_actions`, `list_actions`) before proposing new ones (see §6 The Explorer).
 
 **Tools vs Actions:**
 
@@ -178,6 +178,7 @@ def my_build_step(x):
 | `tags` | Optional. Try rules with matching tags next |
 | `fallback` | If explicit rules and tags fail, fall back to vector search |
 | `explorable` | If True and `THEOW_EXPLORE=1` is set in environment, explore via LLM when all rules are exhausted. Default False |
+| `collection` | Optional. Chroma collection name for this function's rules. Default `"default"`. Use separate collections when problem types have distinct semantic spaces (e.g. `"test_failures"` vs `"dep_resolution"`) |
 
 **Auto-captured tracing:** On exploration, Theow always captures the full traceback (`traceback.format_exc()`), exception type and message, and Python logging output (via a temporary handler on the root logger during execution). These are injected into the LLM prompt alongside the consumer's context. The consumer builds domain context (stderr, config, package name). Theow handles Python-level tracing. Neither duplicates the other.
 
@@ -244,12 +245,12 @@ However, `explorable=True` alone does not activate exploration. The environment 
 just onboard go --single-pkg="github.com/some/pkg"
 
 # Exploration run: both gates open
-THEOW_EXPLORE=1 just onboard go --single-pkg="github.com/some/pkg" --from=9 --until=9
+THEOW_EXPLORE=1 just onboard go --single-pkg="github.com/some/pkg" --only-step=run_tests
 ```
 
 `session_limit` acts as a third safety net, capping total LLM calls per session.
 
-When `explorable=False` (default), Theow only tries rules — no exploration, no new rules produced. Deterministic rules run without LLM. Probabilistic rules still hand off to the LLM if matched, but nothing is persisted.
+When `explorable=False` (default), Theow only tries rules. No exploration, no new rules produced. Deterministic rules run without LLM. Probabilistic rules still hand off to the LLM if matched, but nothing is persisted.
 
 ### 3.5 Resolve (Direct Call)
 
@@ -345,6 +346,7 @@ class Rule:
 
     # Classification
     tags: list[str] = field(default_factory=list)
+    collection: str = "default"  # Chroma collection for indexing
 
     # Probabilistic path (optional)
     llm_config: LLMConfig | None = None
@@ -389,7 +391,7 @@ class LLMConfig:
     use_secondary: bool = False
 ```
 
-`resolve()` and `explore()` both return a `Rule`. When returned from `resolve()`, params are already resolved — named regex captures from `when:` facts and values from the context dict are interpolated into `then:` action params. When returned from `explore()`, the rule has been structurally validated (parse, match, actions exist). Through `@theow.mark()`, the rule is also tested by retrying the original function (see §6 Validation).
+`resolve()` and `explore()` both return a `Rule`. When returned from `resolve()`, params are already resolved: named regex captures from `when:` facts and values from the context dict are interpolated into `then:` action params. When returned from `explore()`, the rule has been structurally validated (parse, match, actions exist). Through `@theow.mark()`, the rule is also tested by retrying the original function (see §6 Validation).
 
 `success_count` and `fail_count` are tracked in Chroma metadata. `theow.meow()` surfaces them.
 
@@ -414,11 +416,11 @@ llm_config:
 
 Context is the single input to the resolution and exploration pipeline. It's a flat dict returned by `context_from` (or passed directly to `resolve()`/`explore()`). It serves three purposes:
 
-1. **Metadata filter** — context keys matching known Chroma metadata fields become `where` filters
-2. **Semantic query** — the longest string value becomes the vector search query
-3. **Param resolution** — all context values (plus regex captures) are available for `then:` action params
+1. **Metadata filter**: context keys matching known Chroma metadata fields become `where` filters
+2. **Semantic query**: the longest string value becomes the vector search query
+3. **Param resolution**: all context values (plus regex captures) are available for `then:` action params
 
-Theow determines the roles automatically. On startup, it scans all indexed rules and collects keys from `when:` facts that use `equals` — these become the set of known metadata keys. At query time:
+Theow determines the roles automatically. On startup, it scans all indexed rules and collects keys from `when:` facts that use `equals`. These become the set of known metadata keys. At query time:
 
 ```python
 # Theow internally:
@@ -436,7 +438,7 @@ results = collection.query(query_texts=[query_text], where=where, n_results=K)
 
 Chroma pre-filters by metadata, then runs vector similarity on the filtered set. One call.
 
-The embedding model (`all-MiniLM-L6-v2`) truncates at 256 tokens and performs best with shorter inputs (trained on 128-token sequences). Using only the longest string value — typically stderr — keeps queries focused and within the model's sweet spot.
+The embedding model (`all-MiniLM-L6-v2`) truncates at 256 tokens and performs best with shorter inputs (trained on 128-token sequences). Using only the longest string value (typically stderr) keeps queries focused and within the model's sweet spot.
 
 ### Chroma Embedding Strategy
 
@@ -461,6 +463,7 @@ as: github.com/imdario/mergo"
 
 ```yaml
 name: module_path_rename
+collection: dep_resolution
 description: >
   Module had a URL rename. Build fails because the required
   path doesn't match the module's declared path.
@@ -492,6 +495,7 @@ then:
 
 ```yaml
 name: build_failure_unknown
+collection: build_failures
 description: >
   Build fails with an error not covered by deterministic rules.
   Use LLM to investigate and propose a resolution.
@@ -527,19 +531,24 @@ flowchart LR
 2. **Vector search** on the filtered set finds semantically similar rules
 3. **Structured validation** on `when:` facts confirms the rule actually applies
 
-### Chroma Collection
+### Chroma Collections
 
-Single collection. Rule metadata includes: `type` (deterministic/probabilistic), content hash, success/fail counts, and all `equals` fact values (for metadata filtering).
+By default, all rules go into a `"default"` collection. The `collection` parameter on `@theow.mark()` allows using separate collections when problem types have distinct semantic spaces. This improves match quality by keeping embeddings in the same domain.
+
+Rule metadata includes: `type` (deterministic/probabilistic), content hash, success/fail counts, and all `equals` fact values (for metadata filtering).
 
 ### Indexing
 
-Rules are `.rule.yaml` files in the `rules/` directory. Actions are `.py` files in `actions/` and in the consumer's codebase. Theow scans both on startup and syncs with Chroma using content hashes:
+Rules are `.rule.yaml` files in the `rules/` directory. Each rule can specify a `collection` field to control which Chroma collection it's indexed into. Default is `"default"`.
+
+Actions are `.py` files in `actions/` and in the consumer's codebase. Theow scans both on startup and syncs with Chroma using content hashes:
 
 ```
 Startup:
   for each .rule.yaml in rules/
+    collection = rule.collection or "default"
     hash = sha256(file contents)
-    chroma_hash = chroma.get_metadata(rule_name).hash
+    chroma_hash = chroma.get_metadata(collection, rule_name).hash
 
     if no chroma entry → embed and store hash
     if hash != chroma_hash → re-embed and update hash
@@ -550,7 +559,7 @@ Startup:
     store in Chroma for Explorer to search
 ```
 
-At resolve time, Chroma returns rule hits. At explore time, Chroma also returns action hits so the LLM can reuse existing actions.
+At resolve time, Chroma returns rule hits from the collection specified by `@theow.mark(collection=...)`. At explore time, Chroma also returns action hits so the LLM can reuse existing actions.
 
 ---
 
@@ -558,7 +567,7 @@ At resolve time, Chroma returns rule hits. At explore time, Chroma also returns 
 
 The rule matching path. Known situations, known responses.
 
-Deterministic rules (with `then:` actions) execute without LLM. Probabilistic rules (with `llm_config`) hand off to the LLM gateway — the LLM runs with the rule's prompt and tools, applies whatever fix it finds, but **nothing is persisted**. No new rules, no new actions. It's a fire-and-forget LLM call for long-tail problems that aren't worth codifying. Through `@theow.mark()`, the result is validated by retrying the original function.
+Deterministic rules (with `then:` actions) execute without LLM. Probabilistic rules (with `llm_config`) hand off to the LLM gateway. The LLM runs with the rule's prompt and tools, applies whatever fix it finds, but **nothing is persisted**. No new rules, no new actions. It's a fire-and-forget LLM call for long-tail problems that aren't worth codifying. Through `@theow.mark()`, the result is validated by retrying the original function.
 
 ```mermaid
 flowchart TD
@@ -613,20 +622,44 @@ The session cache lives on the Theow instance. When the instance dies, cache is 
 
 After session cache and Chroma miss (see flowchart above):
 
-1. Theow builds an LLM tool-calling session with the consumer's tools plus a built-in `done` tool
-2. LLM investigates and fixes the problem using tools
-3. LLM reads existing rules and actions to learn the format, then writes a new `.rule.yaml` and action `.py` to `.theow/`
-4. LLM calls `done(rule_file="...")`
-5. Theow validates the proposed rule (see Validation below)
-6. If validation fails, error goes back to the LLM in the same session for revision
-7. If validation passes, Theow caches and returns the `Rule`
+1. Theow builds an LLM tool-calling session with the consumer's tools plus built-in tools (see below)
+2. LLM searches existing rules/actions to check for duplicates or reusable components
+3. LLM investigates and fixes the problem using tools
+4. LLM writes a new `.rule.yaml` and optionally action `.py` to `.theow/`
+5. LLM calls `done(rule_file="...")`
+6. Theow validates the proposed rule (see Validation below)
+7. If validation fails, error goes back to the LLM in the same session for revision
+8. If validation passes, Theow caches and returns the `Rule`
 
-### The `done` Tool
+### Built-in Tools
 
-Theow injects a `done` tool into every exploration session alongside the consumer's tools:
+Theow injects these tools into every exploration session alongside the consumer's tools:
 
 ```python
-# Theow injects this automatically
+# Theow injects these automatically
+
+@theow.tool()
+def search_rules(query: str) -> list[dict]:
+    """Search existing rules by semantic similarity.
+    Use before writing a new rule to avoid duplicates."""
+    ...
+
+@theow.tool()
+def search_actions(query: str) -> list[dict]:
+    """Search existing actions by semantic similarity.
+    Use before writing a new action to reuse existing ones."""
+    ...
+
+@theow.tool()
+def list_rules() -> list[str]:
+    """List all rule names in the current collection."""
+    ...
+
+@theow.tool()
+def list_actions() -> list[str]:
+    """List all action names."""
+    ...
+
 @theow.tool()
 def done(rule_file: str) -> dict:
     """Signal that investigation is complete.
@@ -638,12 +671,13 @@ def done(rule_file: str) -> dict:
 
 After the LLM calls `done`, Theow validates the proposed rule within the same session:
 
-1. **Parse** — is the YAML valid? Does it deserialize into a `Rule`?
-2. **Match** — do the `when:` facts match the current context?
-3. **Actions** — are the referenced actions registered (existing or newly written)?
-4. **Test** — retry the original function with the fix applied. Does it work?
+1. **Parse**: is the YAML valid? Does it deserialize into a `Rule`?
+2. **Match**: do the `when:` facts match the current context?
+3. **Actions**: are the referenced actions registered (existing or newly written)?
+4. **Conflict**: does an existing rule have the same `when:` facts but different `then:` actions? If so, reject with error explaining the conflict. Same `when:` should have same `then:`.
+5. **Test**: retry the original function with the fix applied. Does it work?
 
-Step 4 only applies when exploration runs through `@theow.mark()`, which has the original function. For direct `theow.explore()` calls, there is no function to retry — validation stops after step 3.
+Step 5 only applies when exploration runs through `@theow.mark()`, which has the original function. For direct `theow.explore()` calls, there is no function to retry. Validation stops after step 4.
 
 If any step fails, Theow sends the error back to the LLM in the same session. The LLM has full conversation history and can revise. This loop repeats until validation passes or the budget is exhausted.
 
@@ -652,10 +686,10 @@ If any step fails, Theow sends the error back to the LLM in the same session. Th
 `explore()` returns a `Rule`, same as `resolve()`. The rule YAML and action files are on disk in `.theow/`. The consumer's exploration script can commit them, open a PR, or delete them.
 
 ```python
-# Direct call — structurally validated (parse, match, actions exist)
+# Direct call: structurally validated (parse, match, actions exist)
 rule = theow.explore(context={...}, tools=[...])
 
-# Through decorator — fully validated (structural + retry confirms the fix works)
+# Through decorator: fully validated (structural + retry confirms the fix works)
 @theow.mark(explorable=True, context_from=lambda x, exc: {...})
 def my_step(x):
     ...
@@ -700,11 +734,11 @@ flowchart LR
 
 ### Mutability Boundary
 
-Rules and tools are immutable. Actions are mutable.
+Rules, tools, and actions are all immutable.
 
 - **Rules** are written once by the Explorer or a human. They define when a rule applies (`when:` conditions) and which actions to call (`then:`). The LLM proposes new rules but never modifies existing ones. If a rule needs changing, a human changes it. This prevents silent match regressions (e.g. a broadened regex matching situations it shouldn't).
 - **Tools** are registered by the consumer. The LLM calls them during exploration but cannot modify them. They define what the LLM can do.
-- **Actions** are mutable. The LLM can create new actions or modify existing ones. The LLM writes action files directly during exploration.
+- **Actions** are immutable. The LLM creates new actions with new names but never modifies existing ones. If an action needs changing, a human changes it. This prevents silent breakage of rules that depend on the action. New action = new file, new name. Old rules keep working.
 
 ### What Theow Does NOT Do
 

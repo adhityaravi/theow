@@ -1,0 +1,46 @@
+[project]
+name = "theow"
+version = "0.0.0"
+description = "LLM-in-the-loop rule based expert system"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "chromadb>=0.4",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "google-genai>=0.3",
+    "anthropic>=0.40",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+    "ty>=0.0.15",
+    "tox>=4.0",
+    "tox-uv>=1.0",
+]
+daemon = [
+    # Future: trio, httpx, etc. for server mode
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/theow"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

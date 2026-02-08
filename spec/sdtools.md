@@ -1,4 +1,4 @@
-# Theow × sd-tools — Integration Design
+# Theow x sd-tools: Integration Design
 
 > How sd-tools integrates Theow for automated failure resolution.
 
@@ -16,9 +16,9 @@ sd-tools onboards ~8500 Go packages into Superdistro (more packages and language
 - Monorepo tagging schemes not handled
 
 **Onboard phase** (11-step pipeline) where tasks fail. Top failures:
-- `sourcecraft-pack` — build failures
-- `sourcecraft-test` — test failures
-- `early-test` — pre-onboarding test failures
+- `sourcecraft-pack`: build failures
+- `sourcecraft-test`: test failures
+- `early-test`: pre-onboarding test failures
 
 Currently handled with hardcoded heuristics:
 - `_try_resolve_module_renames()` in `tree_resolver.py`
@@ -45,13 +45,13 @@ Theow replaces hardcoded heuristics with a learning rule engine. Novel failures 
 
 ### 3.1 Overview
 
-| Location | Failure Type | Pattern | Exploration |
-|----------|--------------|---------|-------------|
-| `RepoCache.get()` | Git/tag failures | `@theow.mark` on `_get_impl` | Yes |
-| `_get_deps_for_single_package()` | go mod tidy failures | `@theow.mark` on `_get_deps_impl` | Yes |
-| `run_tests` | Test failures | `@theow.mark` on `_run_tests_impl` | Yes |
-| `early_test` | Early test failures | `@theow.mark` on `_early_test_impl` | Yes |
-| `pack` | Build failures | `@theow.mark` on `_pack_impl` | Yes |
+| Location | Failure Type | Collection | Pattern |
+|----------|--------------|------------|---------|
+| `RepoCache.get()` | Git/tag failures | `repo_acquisition` | `@theow.mark` on `_get_impl` |
+| `_get_deps_for_single_package()` | go mod tidy failures | `dep_resolution` | `@theow.mark` on `_get_deps_impl` |
+| `run_tests` | Test failures | `test_failures` | `@theow.mark` on `_run_tests_impl` |
+| `early_test` | Early test failures | `test_failures` | `@theow.mark` on `_early_test_impl` |
+| `pack` | Build failures | `build_failures` | `@theow.mark` on `_pack_impl` |
 
 ### 3.2 Abstraction Pattern
 
@@ -79,6 +79,7 @@ def run_tests(tree: DependencyTree, ob: Onboarder):
     },
     max_retries=5,
     tags=["go", "test"],
+    collection="test_failures",
     explorable=True,
 )
 def _run_tests_impl(tree: DependencyTree, ob: Onboarder):
@@ -112,6 +113,7 @@ def get(self, source: Package, files=None, fetch=True) -> bool:
     },
     max_retries=3,
     tags=["go", "git", "repo"],
+    collection="repo_acquisition",
     explorable=True,
 )
 def _get_impl(self, source: Package, files, fetch) -> bool:
@@ -135,6 +137,7 @@ def _get_impl(self, source: Package, files, fetch) -> bool:
     },
     max_retries=5,
     tags=["go", "dep_resolution"],
+    collection="dep_resolution",
     explorable=True,
 )
 def _get_deps_impl(self, package: Package):
@@ -165,6 +168,7 @@ def pack(tree: DependencyTree, ob: Onboarder):
     },
     max_retries=3,
     tags=["go", "build"],
+    collection="build_failures",
     explorable=True,
 )
 def _pack_impl(tree: DependencyTree, ob: Onboarder):
@@ -310,6 +314,7 @@ These are NOT hardcoded upfront. The Explorer discovers patterns and proposes ru
 ```yaml
 # .theow/rules/go_version_mismatch.rule.yaml
 name: go_version_mismatch
+collection: test_failures
 description: >
   Test fails because module requires a different Go version.
   Patch spread task.yaml to install correct version.
@@ -333,6 +338,7 @@ then:
 ```yaml
 # .theow/rules/go_vet_failure.rule.yaml
 name: go_vet_failure
+collection: test_failures
 description: >
   go vet fails, blocking test execution. Add -vet=off flag.
 tags: [go, test, vet]
@@ -352,6 +358,7 @@ then:
 ```yaml
 # .theow/rules/module_path_rename.rule.yaml
 name: module_path_rename
+collection: dep_resolution
 description: >
   Module was renamed. go mod tidy fails because declared path
   doesn't match required path.
@@ -376,11 +383,12 @@ then:
 
 ### 6.2 Probabilistic Rule (Test Generation)
 
-Reserved for genuinely creative work — generating tests when coverage is inadequate:
+Reserved for genuinely creative work (generating tests when coverage is inadequate):
 
 ```yaml
 # .theow/rules/generate_tests.rule.yaml
 name: generate_tests
+collection: test_failures
 description: >
   Tests pass but coverage is inadequate.
   Generate meaningful tests for the package.
@@ -498,7 +506,7 @@ theow = Theow(
 )
 ```
 
-Tools and actions are auto-discovered from `.theow/tools.py` and `.theow/actions/*.py`.
+Tools are registered from `.theow/tools.py` (imported at startup). Actions are auto-discovered by Theow from `.theow/actions/*.py`.
 
 ### 8.3 Directory Structure
 
