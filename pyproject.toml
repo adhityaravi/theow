@@ -12,6 +12,7 @@ dependencies = [
     "google-genai>=0.3",
     "anthropic>=0.40",
     "rich>=13.0",
+    "structlog>=24.0",
 ]
 
 [project.optional-dependencies]
