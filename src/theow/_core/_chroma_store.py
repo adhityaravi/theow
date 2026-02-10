@@ -8,11 +8,15 @@ from typing import Any
 
 import chromadb
 from chromadb.config import Settings
+from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
 
 from theow._core._logging import get_logger
 from theow._core._models import Rule
 
 logger = get_logger(__name__)
+
+# TODO: explore other available providers
+_embedding_function = ONNXMiniLM_L6_V2(preferred_providers=["CPUExecutionProvider"])
 
 
 class ChromaStore:
@@ -36,6 +40,7 @@ class ChromaStore:
         self._actions_collection = self._client.get_or_create_collection(
             name="theow-actions",
             metadata={"hnsw:space": "cosine"},
+            embedding_function=_embedding_function,
         )
 
         # Cache of known metadata keys from indexed rules
@@ -45,6 +50,7 @@ class ChromaStore:
         return self._client.get_or_create_collection(
             name=name,
             metadata={"hnsw:space": "cosine"},
+            embedding_function=_embedding_function,
         )
 
     def index_rule(self, rule: Rule) -> None:

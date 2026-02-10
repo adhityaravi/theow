@@ -25,7 +25,7 @@ def _ensure_configured() -> None:
         )
 
     # Suppress noisy SDK loggers (they dump full request payloads at DEBUG)
-    for noisy in ("httpx", "httpcore", "anthropic", "onnxruntime"):
+    for noisy in ("httpx", "httpcore", "anthropic", "chromadb"):
         logging.getLogger(noisy).setLevel(logging.ERROR)
         structlog.configure(
             processors=[
