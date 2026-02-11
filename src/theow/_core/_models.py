@@ -132,14 +132,31 @@ class LLMConfig:
     constraints: dict[str, Any] = field(default_factory=dict)
     use_secondary: bool = False
 
-    def get_prompt(self, base_path: Path | None = None) -> str:
-        """Get the prompt content, loading from file if needed."""
+    def get_prompt(
+        self,
+        base_path: Path | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        """Get the prompt content, loading from file if needed.
+
+        Args:
+            base_path: Base path for resolving file:// references.
+            context: Dict of values to replace {placeholders} in the prompt.
+        """
         if self.prompt_template.startswith("file://"):
             file_path = self.prompt_template[7:]
             if base_path:
                 file_path = str(base_path / file_path)
-            return Path(file_path).read_text()
-        return self.prompt_template
+            content = Path(file_path).read_text()
+        else:
+            content = self.prompt_template
+
+        # Replace {placeholders} with context values
+        if context:
+            for key, value in context.items():
+                content = content.replace(f"{{{key}}}", str(value))
+
+        return content
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for YAML serialization."""
@@ -177,6 +194,7 @@ class Rule:
     tags: list[str] = field(default_factory=list)
     collection: str = "default"
     llm_config: LLMConfig | None = None
+    notes: str | None = None
 
     # Runtime state (not serialized)
     _resolved_params: dict[str, Any] = field(default_factory=dict, repr=False)
@@ -186,13 +204,13 @@ class Rule:
 
     @property
     def is_ephemeral(self) -> bool:
-        """Ephemeral rules are unproven, pending validation."""
-        return "ephemeral" in self.tags
+        """Ephemeral rules are unproven, pending validation.
 
-    def promote(self) -> None:
-        """Remove ephemeral tag after successful validation."""
-        if "ephemeral" in self.tags:
-            self.tags.remove("ephemeral")
+        A rule is ephemeral if it lives in the ephemeral/ subfolder.
+        """
+        if self._source_path:
+            return "ephemeral" in self._source_path.parts
+        return False
 
     @property
     def type(self) -> Literal["deterministic", "probabilistic"]:
@@ -231,6 +249,7 @@ class Rule:
             tags=list(self.tags),  # Copy to avoid mutation
             collection=self.collection,
             llm_config=self.llm_config,
+            notes=self.notes,
         )
         bound._resolved_params = {**context, **captures}
         bound._action_registry = action_registry
@@ -276,6 +295,8 @@ class Rule:
             data["collection"] = self.collection
         if self.llm_config:
             data["llm_config"] = self.llm_config.to_dict()
+        if self.notes:
+            data["notes"] = self.notes
 
         yaml_str = yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
@@ -310,6 +331,7 @@ class Rule:
             tags=data.get("tags", []),
             collection=data.get("collection", "default"),
             llm_config=LLMConfig.from_dict(data["llm_config"]) if data.get("llm_config") else None,
+            notes=data.get("notes"),
         )
 
     def get_embedding_text(self) -> str:

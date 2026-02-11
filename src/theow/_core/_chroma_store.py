@@ -40,7 +40,7 @@ class ChromaStore:
         self._actions_collection = self._client.get_or_create_collection(
             name="theow-actions",
             metadata={"hnsw:space": "cosine"},
-            embedding_function=_embedding_function,
+            embedding_function=_embedding_function,  # type: ignore[arg-type]
         )
 
         # Cache of known metadata keys from indexed rules
@@ -50,7 +50,7 @@ class ChromaStore:
         return self._client.get_or_create_collection(
             name=name,
             metadata={"hnsw:space": "cosine"},
-            embedding_function=_embedding_function,
+            embedding_function=_embedding_function,  # type: ignore[arg-type]
         )
 
     def index_rule(self, rule: Rule) -> None:

@@ -172,13 +172,14 @@ class Theow:
     ) -> Rule | None:
         """Explore a novel situation using LLM."""
         self._ensure_gateway()
-        return self._explorer.explore(
+        rule, _ = self._explorer.explore(
             context=context,
             tools=tools,
             collection=collection,
             tracing=tracing,
             rejected_attempts=None,
         )
+        return rule
 
     def _ensure_gateway(self) -> None:
         """Lazily create LLM gateway when needed for exploration."""

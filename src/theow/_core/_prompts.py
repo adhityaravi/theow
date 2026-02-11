@@ -22,19 +22,23 @@ multiple files.
 
 - Rules directory: `{rules_dir}`
 - Actions directory: `{actions_dir}`
+- Rule files use the naming convention: `<name>.rule.yaml` (not just `.yaml`)
 
 Always use absolute paths when reading/writing files.
 
 ## Workflow
 
-1. **Search first** - Use `search_rules()` and `search_actions()` to check if a
+1. **Check for prior work** - Use `list_ephemeral_rules()` to check for rules from
+   previous attempts. Continue from there if available.
+
+2. **Search first** - Use `search_rules()` and `search_actions()` to check if a
    similar solution already exists. Don't reinvent the wheel.
 
-2. **Investigate** - Read files, run commands, understand the root cause.
+3. **Investigate** - Read files, run commands, understand the root cause.
 
-3. **Fix & verify** - Apply a fix and confirm it works.
+4. **Fix & verify** - Apply a fix and confirm it works.
 
-4. **Codify** - When ready to write a rule, call `request_templates()` to get
+5. **Codify** - When ready to write a rule, call `request_templates()` to get
    the rule/action syntax. Then write the files and call `submit_rule()`.
 
 If the problem can't or shouldn't be automated, call `give_up(reason)`.
@@ -54,7 +58,7 @@ Now write a rule that captures the GENERAL pattern (not just this specific case)
 
 ### Rule Structure
 
-Write to `{rules_dir}/<name>.rule.yaml`:
+Write to `{rules_dir}/ephemeral/<name>.rule.yaml`:
 
 ```yaml
 name: descriptive_snake_case
@@ -88,8 +92,10 @@ then:
       expected: "{{expected}}"
       workspace: "{{workspace}}"
 
-tags: [ephemeral, relevant, tags]  # ephemeral is REQUIRED - rule is unproven
+tags: [relevant, tags]  # Add 'incomplete' if you can't finish
 collection: collection_name
+notes: |  # Optional - document findings if incomplete
+  What was tried, what worked, what's left to do.
 ```
 
 ### Action Structure (if needed)

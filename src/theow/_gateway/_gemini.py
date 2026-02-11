@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
 from typing import Any, Callable
 
 from google import genai
@@ -12,17 +11,9 @@ from google.genai import types
 
 from theow._core._logging import get_logger
 from theow._core._tools import ExplorationSignal
-from theow._gateway._base import ConversationResult, LLMGateway
+from theow._gateway._base import ConversationResult, LLMGateway, SessionState
 
 logger = get_logger(__name__)
-
-
-@dataclass
-class _SessionState:
-    """Tracks mutable state across the tool-calling loop."""
-
-    tool_calls: int = 0
-    tokens_used: int = 0
 
 
 class GeminiGateway(LLMGateway):
@@ -63,10 +54,12 @@ class GeminiGateway(LLMGateway):
             "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
         }
         if self._is_gemini3:
-            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="high")
+            config_kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_level="high"  # type: ignore[arg-type]
+            )
 
-        config = types.GenerateContentConfig(**config_kwargs)  # type: ignore[arg-type]
-        state = _SessionState()
+        config = types.GenerateContentConfig(**config_kwargs)
+        state = SessionState()
 
         # Initialize or continue history
         self._init_history(messages)
@@ -98,6 +91,13 @@ class GeminiGateway(LLMGateway):
             tool_content = self._execute_functions(function_calls, tool_map, state)
             self._history.append(tool_content)
 
+            # Check for budget warning after tool execution
+            warning = self.check_budget_warning(state, max_calls)
+            if warning:
+                self._history.append(
+                    types.Content(role="user", parts=[types.Part.from_text(text=warning)])
+                )
+
         # Sync messages with history
         self._sync_messages(messages)
 
@@ -118,10 +118,9 @@ class GeminiGateway(LLMGateway):
             content = msg.get("content")
             if isinstance(content, str):
                 role = "user" if msg["role"] == "user" else "model"
-                self._history.append(types.Content(
-                    role=role,
-                    parts=[types.Part.from_text(text=content)]
-                ))
+                self._history.append(
+                    types.Content(role=role, parts=[types.Part.from_text(text=content)])
+                )
 
     def _get_pending_user_content(self, messages: list[dict[str, Any]]) -> types.Content | None:
         """Get the last user message as Content."""
@@ -134,17 +133,14 @@ class GeminiGateway(LLMGateway):
 
         content = last_msg.get("content")
         if isinstance(content, str):
-            return types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=content)]
-            )
+            return types.Content(role="user", parts=[types.Part.from_text(text=content)])
 
         return None
 
     def _call_model(
         self,
         config: types.GenerateContentConfig,
-        state: _SessionState,
+        state: SessionState,
     ) -> types.GenerateContentResponse | None:
         """Call model with current history."""
         logger.debug("Theow --> LLM", turn=state.tool_calls, model=self._model)
@@ -169,12 +165,16 @@ class GeminiGateway(LLMGateway):
                     tool_names.append(p.function_call.name)
 
         # Log output tokens only (like Anthropic) for consistency
-        output_tokens = response.usage_metadata.candidates_token_count if response.usage_metadata else 0
+        output_tokens = (
+            response.usage_metadata.candidates_token_count if response.usage_metadata else 0
+        )
         logger.debug("Theow <-- LLM", tools=tool_names or ["text"], tokens=output_tokens)
 
         return response
 
-    def _extract_model_content(self, response: types.GenerateContentResponse) -> types.Content | None:
+    def _extract_model_content(
+        self, response: types.GenerateContentResponse
+    ) -> types.Content | None:
         """Extract model content from response, preserving thought signatures."""
         if not response.candidates:
             return None
@@ -201,7 +201,7 @@ class GeminiGateway(LLMGateway):
         self,
         function_calls: list[types.Part],
         tool_map: dict[str, Callable[..., Any]],
-        state: _SessionState,
+        state: SessionState,
     ) -> types.Content:
         """Execute functions and return tool response Content with role='tool'."""
         tool_results: list[types.Part] = []
@@ -217,18 +217,22 @@ class GeminiGateway(LLMGateway):
             args = dict(call.args) if call.args else {}
 
             if signal_to_raise:
-                tool_results.append(types.Part.from_function_response(
-                    name=name, response={"skipped": "signal received"}
-                ))
+                tool_results.append(
+                    types.Part.from_function_response(
+                        name=name, response={"skipped": "signal received"}
+                    )
+                )
                 continue
 
             try:
                 result = self._execute_single(name, args, tool_map)
                 tool_results.append(types.Part.from_function_response(name=name, response=result))
             except ExplorationSignal as sig:
-                tool_results.append(types.Part.from_function_response(
-                    name=name, response={"signal": type(sig).__name__}
-                ))
+                tool_results.append(
+                    types.Part.from_function_response(
+                        name=name, response={"signal": type(sig).__name__}
+                    )
+                )
                 signal_to_raise = sig
 
         # Create tool response with role='tool' (critical for Gemini)

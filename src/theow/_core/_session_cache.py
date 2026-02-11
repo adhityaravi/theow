@@ -75,6 +75,11 @@ class SessionCache:
         """Clear all cached entries."""
         self._entries.clear()
 
+    def invalidate(self, rule_name: str) -> None:
+        """Remove a cached entry by rule name."""
+        self._entries = [e for e in self._entries if e.rule.name != rule_name]
+        logger.debug("Invalidated cache entry", rule=rule_name)
+
     @property
     def size(self) -> int:
         return len(self._entries)

@@ -275,6 +275,8 @@ class MarkDecorator:
             4. If fn() succeeds after ephemeral rule, promote it
             5. If fn() fails after ephemeral rule, delete it and track rejection
             6. Repeat until max_retries or no recovery possible
+            7. If exploration was attempted but failed, continue to next attempt
+               (budget resets between attempts)
 
         Theow never blocks the consumer pipeline. If recovery fails or theow
         itself errors, the original exception is re-raised.
@@ -307,11 +309,20 @@ class MarkDecorator:
 
             # Theow recovery is best-effort. Internal errors are logged, not propagated.
             try:
-                success, rule = self._attempt_recovery(
-                    fn, args, kwargs, last_exception, config, rejected_attempts
+                success, rule, explored = self._attempt_recovery(
+                    fn,
+                    args,
+                    kwargs,
+                    last_exception,
+                    config,
+                    rejected_attempts,
+                    attempt_number=attempt + 1,
                 )
                 if not success:
-                    break
+                    # Only break if exploration wasn't attempted
+                    # If explored, continue to next attempt (budget resets)
+                    if not explored:
+                        break
                 last_applied_rule = rule
             except Exception as theow_err:
                 logger.error("Theow internal error", error=str(theow_err))
@@ -329,7 +340,8 @@ class MarkDecorator:
         exc: Exception,
         config: MarkConfig,
         rejected_attempts: list[dict[str, Any]] | None = None,
-    ) -> tuple[bool, Rule | None]:
+        attempt_number: int = 1,
+    ) -> tuple[bool, Rule | None, bool]:
         """Attempt recovery after fn() failure.
 
         Steps:
@@ -340,26 +352,31 @@ class MarkDecorator:
             5. If rule created, execute action and return
 
         Returns:
-            (success, rule) where success indicates action executed,
-            and rule is the applied rule (for ephemeral tracking).
+            (success, rule, explored) where:
+            - success: indicates action executed
+            - rule: the applied rule (for ephemeral tracking)
+            - explored: True if exploration was attempted (even if no rule)
         """
         context = self._build_context(config.context_from, args, kwargs, exc)
         if context is None:
-            return False, None
+            return False, None, False
 
         rule = self._try_resolve(context, config)
         if rule:
-            success = self._execute_rule(rule)
-            return success, rule if success else None
+            success = self._execute_rule(rule, context)
+            return success, rule if success else None, False
 
         if self._should_explore(config):
             tracing = self._capture_tracing(exc)
-            rule = self._try_explore(context, tracing, config, rejected_attempts)
+            rule, explored = self._try_explore(
+                context, tracing, config, rejected_attempts, attempt_number
+            )
             if rule:
-                success = self._execute_rule(rule)
-                return success, rule if success else None
+                success = self._execute_rule(rule, context)
+                return success, rule if success else None, True
+            return False, None, explored
 
-        return False, None
+        return False, None, False
 
     def _build_context(
         self,
@@ -402,7 +419,8 @@ class MarkDecorator:
         tracing: TracingInfo,
         config: MarkConfig,
         rejected_attempts: list[dict[str, Any]] | None = None,
-    ) -> Rule | None:
+        attempt_number: int = 1,
+    ) -> tuple[Rule | None, bool]:
         """Run LLM exploration to create a new rule.
 
         Steps:
@@ -411,35 +429,81 @@ class MarkDecorator:
             3. Pass rejected_attempts so LLM avoids repeating failures
             4. Explorer writes ephemeral rule (no validation yet)
             5. Return rule for decorator to execute and validate
+
+        Returns:
+            (rule, explored) tuple where explored=True if exploration was attempted.
         """
         logger.info("Entering exploration mode", collection=config.collection)
         tools = list(self._tool_registry.get_all().values())
 
-        rule = self._explorer.explore(
+        rule, explored = self._explorer.explore(
             context=context,
             tools=tools,
             collection=config.collection,
             tracing=tracing,
             rejected_attempts=rejected_attempts,
+            attempt_number=attempt_number,
         )
 
         if rule:
             logger.info("Explored rule", rule=rule.name, ephemeral=rule.is_ephemeral)
-        return rule
+        return rule, explored
 
-    def _execute_rule(self, rule: Rule) -> bool:
-        """Execute rule's action."""
+    def _execute_rule(self, rule: Rule, context: dict[str, Any] | None = None) -> bool:
+        """Execute rule's action (deterministic) or run LLM (probabilistic)."""
         try:
-            rule.act()
-            return True
+            if rule.type == "probabilistic":
+                return self._execute_probabilistic_rule(rule, context or {})
+            else:
+                rule.act()
+                return True
         except Exception as err:
             logger.warning("Action failed", rule=rule.name, error=str(err))
             return False
 
+    def _execute_probabilistic_rule(self, rule: Rule, context: dict[str, Any]) -> bool:
+        """Execute a probabilistic rule by running LLM with the configured prompt."""
+        if not rule.llm_config:
+            logger.error("Probabilistic rule missing llm_config", rule=rule.name)
+            return False
+
+        # Get prompt with placeholders replaced
+        rules_dir = self._explorer._rules_dir
+        prompt = rule.llm_config.get_prompt(
+            base_path=rules_dir.parent,
+            context=context,
+        )
+
+        # Resolve configured tools from registry
+        tools = []
+        for tool_name in rule.llm_config.tools:
+            tool_fn = self._tool_registry.get(tool_name)
+            if tool_fn:
+                tools.append(tool_fn)
+            else:
+                logger.warning("Tool not found for probabilistic rule", tool=tool_name)
+
+        budget = {
+            "max_tool_calls": rule.llm_config.constraints.get("max_tool_calls", 10),
+            "max_tokens": rule.llm_config.constraints.get("max_tokens", 4096),
+        }
+
+        logger.info("Executing probabilistic rule", rule=rule.name)
+        return self._explorer.run_direct(prompt, tools, budget)
+
     def _promote_rule(self, rule: Rule) -> None:
         """Promote ephemeral rule to permanent after fn() succeeds."""
-        logger.info("Promoting ephemeral rule", rule=rule.name)
-        rule.promote()
+        logger.info("Promoting rule", rule=rule.name)
+
+        # Remove incomplete tag if present
+        if "incomplete" in rule.tags:
+            rule.tags.remove("incomplete")
+
+        # Move from ephemeral/ to main rules folder
+        if rule._source_path and "ephemeral" in str(rule._source_path):
+            new_path = rule._source_path.parent.parent / rule._source_path.name
+            rule._source_path.rename(new_path)
+            rule._source_path = new_path
 
         if rule._source_path and rule._source_path.exists():
             rule.to_yaml(rule._source_path)
@@ -450,16 +514,25 @@ class MarkDecorator:
         """Reject ephemeral rule after fn() fails. Returns info for LLM feedback."""
         logger.warning("Rejecting ephemeral rule", rule=rule.name, error=str(exc))
 
+        # Include rule details so LLM knows what was tried without needing to read deleted files
         rejection = {
             "rule_name": rule.name,
+            "description": rule.description[:200] if rule.description else "",
             "error": str(exc)[:500],
         }
+
+        # Invalidate session cache so we don't return this rule again
+        if self._explorer._session_cache:
+            self._explorer._session_cache.invalidate(rule.name)
+
+        # Don't delete incomplete rules - keep for next attempt
+        if "incomplete" in rule.tags:
+            logger.info("Keeping incomplete rule for next attempt", rule=rule.name)
+            return rejection
 
         for path in rule._created_files:
             if path.exists():
                 path.unlink()
                 logger.debug("Deleted file", path=str(path))
-
-        self._explorer._chroma._get_collection(rule.collection).delete(ids=[rule.name])
 
         return rejection

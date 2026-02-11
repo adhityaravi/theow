@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -11,10 +12,13 @@ from theow._core._models import Rule
 from theow._core._prompts import ERROR, INTRO, TEMPLATES
 from theow._core._session_cache import SessionCache
 from theow._core._tools import (
+    Done,
     ExplorationSignal,
     GiveUp,
     RequestTemplates,
     SubmitRule,
+    make_direct_fix_tools,
+    make_ephemeral_tools,
     make_search_tools,
     make_signal_tools,
 )
@@ -61,41 +65,48 @@ class Explorer:
         collection: str = "default",
         tracing: TracingInfo | None = None,
         rejected_attempts: list[dict[str, Any]] | None = None,
-    ) -> Rule | None:
+        attempt_number: int = 1,
+    ) -> tuple[Rule | None, bool]:
         """Explore a novel situation using LLM.
 
-        Returns ephemeral Rule for decorator to validate via actual fn() execution.
+        Returns:
+            (rule, explored) tuple where:
+            - rule: ephemeral Rule for decorator to validate via actual fn() execution
+            - explored: True if exploration was attempted (even if no rule produced)
+
         Does NOT run action or retry here; that's the decorator's job.
         """
         if self._gateway is None:
             logger.warning("Exploration disabled", reason="no LLM configured")
-            return None
+            return None, False
 
         if self._session_count >= self._session_limit:
             logger.warning(
                 "Session limit reached", count=self._session_count, limit=self._session_limit
             )
-            return None
+            return None, False
 
         if self._session_cache is None:
             self._session_cache = SessionCache()
 
         cached = self._session_cache.check(context)
         if cached:
-            return cached
+            return cached, False
 
         chroma_match = self._check_chroma(context, collection)
         if chroma_match:
-            return chroma_match
+            return chroma_match, False
 
         self._session_count += 1
         logger.info("Investigating", session=f"{self._session_count}/{self._session_limit}")
 
-        rule = self._run_conversation(context, tools, collection, tracing, rejected_attempts)
+        rule, explored = self._run_conversation(
+            context, tools, collection, tracing, rejected_attempts, attempt_number
+        )
         if rule:
             self._session_cache.store(context, rule)
 
-        return rule
+        return rule, explored
 
     def _check_chroma(self, context: dict[str, Any], collection: str) -> Rule | None:
         query_text = self._extract_query_text(context)
@@ -131,11 +142,17 @@ class Explorer:
         collection: str,
         tracing: TracingInfo | None,
         rejected_attempts: list[dict[str, Any]] | None,
-    ) -> Rule | None:
-        """Run multi-phase conversation with LLM."""
+        attempt_number: int = 1,
+    ) -> tuple[Rule | None, bool]:
+        """Run multi-phase conversation with LLM.
+
+        Returns:
+            (rule, explored) tuple where explored=True indicates exploration was attempted.
+        """
         signal_tools = make_signal_tools()
         search_tools = make_search_tools(self._chroma, collection)
-        all_tools = signal_tools + search_tools + tools
+        ephemeral_tools = make_ephemeral_tools(self._rules_dir)
+        all_tools = signal_tools + search_tools + ephemeral_tools + tools
 
         tools_section = self._build_tools_section(all_tools)
         intro = INTRO.format(
@@ -143,7 +160,7 @@ class Explorer:
             rules_dir=self._rules_dir,
             actions_dir=self._rules_dir.parent / "actions",
         )
-        error_prompt = self._build_error_prompt(context, tracing, rejected_attempts)
+        error_prompt = self._build_error_prompt(context, tracing, rejected_attempts, attempt_number)
         initial_prompt = intro + "\n" + error_prompt
         messages = [{"role": "user", "content": initial_prompt}]
 
@@ -161,14 +178,17 @@ class Explorer:
         self,
         messages: list[dict[str, Any]],
         tools: list[Callable[..., Any]],
+        budget: dict[str, Any] | None = None,
     ) -> ExplorationSignal | None:
         """Run conversation until signal or budget exhausted."""
         assert self._gateway is not None
+        if budget is None:
+            budget = {"max_tool_calls": self._max_tool_calls, "max_tokens": self._max_tokens}
         try:
             self._gateway.conversation(
                 messages=messages,
                 tools=tools,
-                budget={"max_tool_calls": self._max_tool_calls, "max_tokens": self._max_tokens},
+                budget=budget,
             )
             return None
         except ExplorationSignal as signal:
@@ -184,16 +204,26 @@ class Explorer:
         tools: list[Callable[..., Any]],
         context: dict[str, Any],
         collection: str,
-    ) -> Rule | None:
-        """Handle exploration signal with pattern matching."""
+    ) -> tuple[Rule | None, bool]:
+        """Handle exploration signal with pattern matching.
+
+        Returns:
+            (rule, explored) tuple where explored=True indicates exploration was attempted.
+        """
         match signal:
             case None:
-                logger.warning("Exploration completed without signal")
-                return None
+                # Budget exhausted - tag any orphaned rules as incomplete for next attempt
+                orphaned = self._find_orphaned_rules()
+                if orphaned:
+                    self._ensure_incomplete_tag(orphaned)
+                    logger.info("Budget exhausted, marked rule as incomplete", rule=orphaned.name)
+                else:
+                    logger.warning("Exploration completed without signal")
+                return None, True  # explored=True, no rule to validate
 
             case GiveUp(reason=reason):
                 logger.warning("Exploration declined", reason=reason)
-                return None
+                return None, True
 
             case RequestTemplates():
                 logger.info("Writing rule")
@@ -206,17 +236,19 @@ class Explorer:
                 return self._handle_signal(signal, messages, tools, context, collection)
 
             case SubmitRule(rule_file=rule_file, action_file=action_file):
-                return self._validate_rule(rule_file, action_file, context, collection)
+                rule = self._validate_rule(rule_file, action_file, context, collection)
+                return rule, True
 
             case _:
                 logger.error("Unknown signal", signal=type(signal).__name__)
-                return None
+                return None, True
 
     def _build_error_prompt(
         self,
         context: dict[str, Any],
         tracing: TracingInfo | None,
         rejected_attempts: list[dict[str, Any]] | None,
+        attempt_number: int = 1,
     ) -> str:
         context_lines = "\n".join(f"{k}: {v}" for k, v in context.items())
 
@@ -229,15 +261,26 @@ class Explorer:
 
 {tracing.traceback}"""
 
+        attempt_section = ""
+        if attempt_number > 1:
+            attempt_section = f"""
+## Continuation
+
+This is attempt {attempt_number}. Previous exploration attempts may have saved
+incomplete rules. Use `list_ephemeral_rules()` to check for work to continue from.
+"""
+
         rejected_section = ""
         if rejected_attempts:
             rejected_lines = []
             for attempt in rejected_attempts[-3:]:  # Limit to last 3
-                rejected_lines.append(f"- {attempt['rule_name']}: {attempt['error']}")
+                desc = attempt.get("description", "")
+                desc_part = f" ({desc})" if desc else ""
+                rejected_lines.append(f"- {attempt['rule_name']}{desc_part}: {attempt['error']}")
             rejected_section = f"""
 ## Previous Failed Attempts
 
-These rules were tried but did not fix the problem:
+These rules were tried but did not fix the problem (files deleted, don't try to read them):
 {chr(10).join(rejected_lines)}
 
 Try a different approach."""
@@ -247,6 +290,7 @@ Try a different approach."""
                 context=context_lines,
                 tracing=tracing_section,
             )
+            + attempt_section
             + rejected_section
         )
 
@@ -298,23 +342,52 @@ Try a different approach."""
             return None
 
         # Track created files for cleanup on rejection
+        # Only includes files created during THIS exploration (not pre-existing actions)
         created_files = [rule_path]
         if action_file:
             action_path = Path(action_file)
             if action_path.exists():
                 created_files.append(action_path)
 
-        # Ensure ephemeral tag is present
-        if "ephemeral" not in rule.tags:
-            rule.tags.append("ephemeral")
-
         bound_rule = rule.bind(captures, context, self._action_registry)
         bound_rule._created_files = created_files
 
-        self._chroma.index_rule(rule)
-        logger.info("Rule indexed as ephemeral", rule=rule.name)
+        # Don't index ephemeral rules - they get indexed when promoted
+        # This avoids ghost entries if validation fails or process crashes
+        logger.info("Rule validated", rule=rule.name)
 
         return bound_rule
+
+    def _find_orphaned_rules(self) -> Rule | None:
+        """Find rule files written during session but not submitted.
+
+        Checks for recent .rule.yaml files in ephemeral folder.
+        """
+        ephemeral_dir = self._rules_dir / "ephemeral"
+        if not ephemeral_dir.exists():
+            return None
+
+        cutoff = time.time() - 300  # Last 5 minutes
+
+        for path in ephemeral_dir.glob("*.rule.yaml"):
+            if path.stat().st_mtime < cutoff:
+                continue
+
+            try:
+                return Rule.from_yaml(path)
+            except Exception:
+                continue
+
+        return None
+
+    def _ensure_incomplete_tag(self, rule: Rule) -> None:
+        """Add 'incomplete' tag and save to file."""
+        if "incomplete" not in rule.tags:
+            rule.tags.append("incomplete")
+
+        # Save updated tags to file
+        if rule._source_path and rule._source_path.exists():
+            rule.to_yaml(rule._source_path)
 
     def _check_conflict(self, rule: Rule) -> str | None:
         existing_rules = self._chroma.list_rules(rule.collection)
@@ -357,6 +430,40 @@ Try a different approach."""
             if isinstance(value, str) and len(value) > len(longest):
                 longest = value
         return longest
+
+    def run_direct(
+        self,
+        prompt: str,
+        tools: list[Callable[..., Any]],
+        budget: dict[str, Any],
+    ) -> bool:
+        """Run direct fix conversation (for probabilistic rules).
+
+        Returns True if LLM signaled Done, False otherwise.
+        """
+        if self._gateway is None:
+            logger.warning("Cannot run direct fix: no LLM configured")
+            return False
+
+        # Add signal tools (give_up, done)
+        all_tools = make_direct_fix_tools() + tools
+
+        messages = [{"role": "user", "content": prompt}]
+        signal = self._converse(messages, all_tools, budget)
+
+        match signal:
+            case Done(message=message):
+                logger.info("Direct fix completed", message=message)
+                return True
+            case GiveUp(reason=reason):
+                logger.warning("Direct fix gave up", reason=reason)
+                return False
+            case None:
+                logger.warning("Direct fix exhausted budget without signal")
+                return False
+            case _:
+                logger.warning("Unexpected signal in direct fix", signal=type(signal).__name__)
+                return False
 
     @property
     def session_count(self) -> int:

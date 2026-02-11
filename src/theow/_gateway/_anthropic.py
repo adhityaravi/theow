@@ -5,24 +5,15 @@ from __future__ import annotations
 import inspect
 import json
 import os
-from dataclasses import dataclass
 from typing import Any, Callable
 
 import anthropic
 
 from theow._core._logging import get_logger
 from theow._core._tools import ExplorationSignal
-from theow._gateway._base import ConversationResult, LLMGateway
+from theow._gateway._base import ConversationResult, LLMGateway, SessionState
 
 logger = get_logger(__name__)
-
-
-@dataclass
-class _SessionState:
-    """Tracks mutable state across the tool-calling loop."""
-
-    tool_calls: int = 0
-    tokens_used: int = 0
 
 
 class AnthropicGateway(LLMGateway):
@@ -51,7 +42,7 @@ class AnthropicGateway(LLMGateway):
         tool_map = {getattr(fn, "__name__", str(id(fn))): fn for fn in tools}
         declarations = self._build_declarations(tools)
 
-        state = _SessionState()
+        state = SessionState()
 
         while state.tool_calls < max_calls:
             response = self._call_model(messages, declarations, max_tokens, state)
@@ -65,6 +56,11 @@ class AnthropicGateway(LLMGateway):
             # Execute tools - may raise ExplorationSignal
             self._execute_tools(tool_uses, tool_map, messages, state)
 
+            # Check for budget warning after tool execution
+            warning = self.check_budget_warning(state, max_calls)
+            if warning:
+                messages.append({"role": "user", "content": warning})
+
         return ConversationResult(
             messages=messages,
             tool_calls=state.tool_calls,
@@ -76,7 +72,7 @@ class AnthropicGateway(LLMGateway):
         messages: list[dict[str, Any]],
         declarations: list[dict[str, Any]],
         max_tokens: int,
-        state: _SessionState,
+        state: SessionState,
     ) -> anthropic.types.Message | None:
         """Send conversation to Claude, update token count."""
         logger.debug("Theow --> LLM", turn=state.tool_calls, model=self._model)
@@ -112,7 +108,7 @@ class AnthropicGateway(LLMGateway):
         tool_uses: list[Any],
         tool_map: dict[str, Callable[..., Any]],
         messages: list[dict[str, Any]],
-        state: _SessionState,
+        state: SessionState,
     ) -> None:
         """Execute tools, append all results in single user message."""
         tool_results: list[dict[str, Any]] = []

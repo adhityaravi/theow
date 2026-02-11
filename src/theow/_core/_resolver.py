@@ -130,6 +130,14 @@ class Resolver:
             n_results=10,
         )
 
+        # Sort results: deterministic rules first, probabilistic last
+        def rule_priority(result: tuple[str, float, dict]) -> tuple[int, float]:
+            _name, distance, metadata = result
+            type_priority = 0 if metadata.get("type") == "deterministic" else 1
+            return (type_priority, distance)
+
+        results = sorted(results, key=rule_priority)
+
         for rule_name, distance, metadata in results:
             logger.debug("Candidate rule", rule=rule_name, distance=f"{distance:.3f}")
 
