@@ -1,6 +1,6 @@
 [project]
 name = "theow"
-version = "0.0.0"
+dynamic = ["version"]
 description = "LLM-in-the-loop rule based expert system"
 readme = "README.md"
 license = "MIT"
@@ -11,6 +11,7 @@ dependencies = [
     "pyyaml>=6.0",
     "google-genai>=0.3",
     "anthropic>=0.40",
+    "github-copilot-sdk>=0.1",
     "rich>=13.0",
     "structlog>=24.0",
 ]
@@ -31,6 +32,9 @@ daemon = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/theow/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/theow"]

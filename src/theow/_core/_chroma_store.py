@@ -15,7 +15,17 @@ from theow._core._models import Rule
 
 logger = get_logger(__name__)
 
-# TODO: explore other available providers
+
+def extract_query_text(context: dict[str, Any]) -> str:
+    """Extract query text from context by finding the longest string value."""
+    longest = ""
+    for value in context.values():
+        if isinstance(value, str) and len(value) > len(longest):
+            longest = value
+    return longest
+
+
+# TODO: explore other available providers or maybe not.
 _embedding_function = ONNXMiniLM_L6_V2(preferred_providers=["CPUExecutionProvider"])
 
 
@@ -69,18 +79,30 @@ class ChromaStore:
             documents=[rule.get_embedding_text()],
             metadatas=[metadata],
         )
-        logger.debug("Indexed rule", rule=rule.name, collection=rule.collection)
+        logger.debug("Rule indexed", rule=rule.name, collection=rule.collection)
 
     def index_action(self, name: str, docstring: str, signature: str) -> None:
         """Index an action for semantic search."""
         embedding_text = f"{name}: {docstring}\nSignature: {signature}"
+        content_hash = hashlib.sha256(embedding_text.encode()).hexdigest()[:16]
+
+        existing = self._actions_collection.get(ids=[name], include=["metadatas"])
+        metadatas = existing.get("metadatas")
+
+        if existing["ids"] and metadatas:
+            stored_hash = metadatas[0].get("content_hash", "")
+            if stored_hash == content_hash:
+                logger.debug("Action unchanged", action=name)
+                return
 
         self._actions_collection.upsert(
             ids=[name],
             documents=[embedding_text],
-            metadatas=[{"docstring": docstring, "signature": signature}],
+            metadatas=[
+                {"docstring": docstring, "signature": signature, "content_hash": content_hash}
+            ],
         )
-        logger.debug("Indexed action", action=name)
+        logger.debug("Action indexed", action=name)
 
     def sync_rules(self, rules_dir: Path) -> None:
         """Sync rules from directory, re-embedding only changed files.
@@ -90,7 +112,6 @@ class ChromaStore:
         if not rules_dir.exists():
             return
 
-        # Track which rules we sync (by collection)
         synced: dict[str, set[str]] = {}
 
         for rule_file in rules_dir.glob("*.rule.yaml"):
@@ -98,7 +119,6 @@ class ChromaStore:
             if rule:
                 synced.setdefault(rule.collection, set()).add(rule.name)
 
-        # Remove stale entries from each collection
         for collection, rule_names in synced.items():
             self._cleanup_stale(collection, rule_names)
 
@@ -113,9 +133,6 @@ class ChromaStore:
 
     def _sync_rule_file(self, path: Path) -> Rule | None:
         """Sync a single rule file. Returns the rule for tracking."""
-        content = path.read_text()
-        file_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
-
         rule = Rule.from_yaml(path)
         collection = self._get_collection(rule.collection)
 
@@ -124,7 +141,7 @@ class ChromaStore:
 
         if existing["ids"] and metadatas:
             stored_hash = metadatas[0].get("content_hash", "")
-            if stored_hash == file_hash:
+            if stored_hash == rule.content_hash():
                 logger.debug("Rule unchanged", rule=rule.name)
                 return rule
 
@@ -140,7 +157,7 @@ class ChromaStore:
             return None
 
         # We don't store full rule YAML in Chroma, only embeddings
-        # Rules must be loaded from files; this just confirms existence
+        # Rules must be loaded from files. this just confirms existence
         return None
 
     def query_rules(
@@ -187,7 +204,7 @@ class ChromaStore:
                 include=["metadatas"],
             )
         except Exception as e:
-            logger.warning("Action query failed", error=str(e))
+            logger.warning("Chroma query failed", error=str(e))
             return []
 
         ids = results.get("ids")

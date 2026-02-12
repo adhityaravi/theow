@@ -14,13 +14,11 @@ from theow._core._decorators import (
     set_standalone_registry,
 )
 from theow._core._explorer import Explorer
-from theow._core._logging import get_logger
+from theow._core._logging import get_logger, set_engine_name
 from theow._core._models import Rule
 from theow._core._resolver import Resolver
 from theow._core._stats import meow as _meow
-from theow._gateway._anthropic import AnthropicGateway
-from theow._gateway._base import LLMGateway
-from theow._gateway._gemini import GeminiGateway
+from theow._gateway import LLMGateway, create_gateway
 
 logger = get_logger(__name__)
 
@@ -34,12 +32,16 @@ class Theow:
     def __init__(
         self,
         theow_dir: str = "./.theow",
+        name: str = "Theow",
         llm: str | None = None,
         llm_secondary: str | None = None,
         session_limit: int = 20,
         max_tool_calls: int = 30,
         max_tokens: int = 8192,
     ) -> None:
+        self._name = name
+        set_engine_name(name)
+
         self._theow_dir = Path(theow_dir)
         self._llm = llm
         self._llm_secondary = llm_secondary
@@ -76,7 +78,6 @@ class Theow:
             rules_dir=self._theow_dir / "rules",
         )
 
-        # Explorer is created with lazy gateway
         self._explorer = Explorer(
             chroma=self._chroma,
             gateway=None,  # Lazy - set via property when needed
@@ -95,17 +96,6 @@ class Theow:
 
         self._sync_on_startup()
 
-    def _create_gateway(self, llm_spec: str) -> LLMGateway:
-        """Create gateway from provider/model spec."""
-        provider, model = llm_spec.split("/", 1)
-
-        if provider == "gemini":
-            return GeminiGateway(model=model)
-        elif provider == "anthropic":
-            return AnthropicGateway(model=model)
-        else:
-            raise ValueError(f"Unknown LLM provider: {provider}")
-
     def _sync_on_startup(self) -> None:
         """Sync rules and actions with Chroma on startup."""
         self._chroma.sync_rules(self._theow_dir / "rules")
@@ -114,7 +104,6 @@ class Theow:
         for name, meta in self._action_registry._metadata.items():
             self._chroma.index_action(name, meta["docstring"], meta["signature"])
 
-        # Initialize gateway if LLM is configured
         self._ensure_gateway()
 
     def tool(self, name: str | None = None) -> Callable[[Callable[P, R]], Callable[P, R]]:
@@ -190,15 +179,21 @@ class Theow:
             logger.warning("Exploration disabled", reason="no LLM configured")
             return
 
-        self._gateway = self._create_gateway(self._llm)
+        self._gateway = create_gateway(self._llm)
         self._explorer.set_gateway(self._gateway)
 
         if self._llm_secondary:
-            self._secondary_gateway = self._create_gateway(self._llm_secondary)
+            self._secondary_gateway = create_gateway(self._llm_secondary)
 
     def meow(self) -> None:
         """Print stats. 🐱"""
         _meow(self._chroma)
+
+    stats = meow
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     @property
     def theow_dir(self) -> Path:

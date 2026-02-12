@@ -1,4 +1,9 @@
-"""Gemini LLM gateway with manual history management."""
+"""Gemini LLM gateway with manual history management.
+
+Gemini gateway currently follows a Theow native approach for conversation.
+Gemini's models act as pure brains, with Theow being the hands managing the conversation flow and tool execution.
+This lets Theow have a leash on the model's behavior and ensures consistent handling of tool calls and budget across providers.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,7 @@ from typing import Any, Callable
 from google import genai
 from google.genai import types
 
-from theow._core._logging import get_logger
+from theow._core._logging import get_engine_name, get_logger
 from theow._core._tools import ExplorationSignal
 from theow._gateway._base import ConversationResult, LLMGateway, SessionState
 
@@ -45,8 +50,8 @@ class GeminiGateway(LLMGateway):
         Messages list is modified in-place.
         Raises ExplorationSignal subclasses when LLM calls signal tools.
         """
-        max_calls = budget.get("max_tool_calls", 30)
-        tool_map = {getattr(fn, "__name__", str(id(fn))): fn for fn in tools}
+        max_calls, _ = self._extract_budget(budget)
+        tool_map = self._build_tool_map(tools)
 
         # Build config
         config_kwargs: dict[str, Any] = {
@@ -83,12 +88,12 @@ class GeminiGateway(LLMGateway):
                 self._history.append(model_content)
 
             # Check for function calls
-            function_calls = self._extract_function_calls(response)
-            if not function_calls:
+            tool_calls = self._extract_tool_calls(response)
+            if not tool_calls:
                 break
 
-            # Execute functions and add tool response to history
-            tool_content = self._execute_functions(function_calls, tool_map, state)
+            # Execute tools and add tool response to history
+            tool_content = self._execute_tool_calls(tool_calls, tool_map, state)
             self._history.append(tool_content)
 
             # Check for budget warning after tool execution
@@ -143,7 +148,12 @@ class GeminiGateway(LLMGateway):
         state: SessionState,
     ) -> types.GenerateContentResponse | None:
         """Call model with current history."""
-        logger.debug("Theow --> LLM", turn=state.tool_calls, model=self._model)
+        logger.debug(
+            f"{get_engine_name()} --> LLM",
+            provider="gemini",
+            turn=state.tool_calls,
+            model=self._model,
+        )
         try:
             response = self._client.models.generate_content(
                 model=self._model,
@@ -168,7 +178,11 @@ class GeminiGateway(LLMGateway):
         output_tokens = (
             response.usage_metadata.candidates_token_count if response.usage_metadata else 0
         )
-        logger.debug("Theow <-- LLM", tools=tool_names or ["text"], tokens=output_tokens)
+        logger.debug(
+            f"{get_engine_name()} <-- LLM",
+            tools=tool_names or ["text"],
+            tokens=output_tokens,
+        )
 
         return response
 
@@ -186,7 +200,7 @@ class GeminiGateway(LLMGateway):
         # Return the full content to preserve thought signatures
         return candidate.content
 
-    def _extract_function_calls(self, response: types.GenerateContentResponse) -> list[types.Part]:
+    def _extract_tool_calls(self, response: types.GenerateContentResponse) -> list[types.Part]:
         """Extract function call parts from response."""
         if not response.candidates:
             return []
@@ -197,17 +211,17 @@ class GeminiGateway(LLMGateway):
 
         return [p for p in candidate.content.parts if p.function_call]
 
-    def _execute_functions(
+    def _execute_tool_calls(
         self,
-        function_calls: list[types.Part],
+        tool_calls: list[types.Part],
         tool_map: dict[str, Callable[..., Any]],
         state: SessionState,
     ) -> types.Content:
-        """Execute functions and return tool response Content with role='tool'."""
+        """Execute tools and return tool response Content with role='tool'."""
         tool_results: list[types.Part] = []
         signal_to_raise: ExplorationSignal | None = None
 
-        for part in function_calls:
+        for part in tool_calls:
             call = part.function_call
             if call is None or call.name is None:
                 continue
@@ -225,7 +239,7 @@ class GeminiGateway(LLMGateway):
                 continue
 
             try:
-                result = self._execute_single(name, args, tool_map)
+                result = self._format_tool_result(name, args, tool_map)
                 tool_results.append(types.Part.from_function_response(name=name, response=result))
             except ExplorationSignal as sig:
                 tool_results.append(
@@ -245,25 +259,23 @@ class GeminiGateway(LLMGateway):
 
         return tool_content
 
-    def _execute_single(
+    def _format_tool_result(
         self,
         name: str,
         args: dict[str, Any],
         tool_map: dict[str, Callable[..., Any]],
     ) -> dict[str, Any]:
-        """Execute one function. Returns result dict."""
-        fn = tool_map.get(name)
-        if not fn:
-            return {"error": f"Unknown tool: {name}"}
+        """Execute tool and format result for Gemini API."""
+        result, is_error = self._execute_tool(name, args, tool_map)
 
-        try:
-            result = fn(**args)
-            return {"result": result}
-        except ExplorationSignal:
-            raise
-        except Exception as e:
-            logger.warning("Tool failed", tool=name, error=str(e))
-            return {"error": str(e)}
+        if is_error:
+            return {
+                "error": result.get("error", str(result))
+                if isinstance(result, dict)
+                else str(result)
+            }
+
+        return {"result": result}
 
     def _sync_messages(self, messages: list[dict[str, Any]]) -> None:
         """Sync messages list with history for text content."""
@@ -277,8 +289,8 @@ class GeminiGateway(LLMGateway):
                 if text_parts:
                     messages.append({"role": role, "content": " ".join(text_parts)})
 
-    def reset_history(self) -> None:
-        """Reset conversation history."""
+    def reset(self) -> None:
+        """Reset gateway state including conversation history."""
         self._history = []
 
     def generate(

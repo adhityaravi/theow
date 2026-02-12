@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from theow._core._chroma_store import extract_query_text
 from theow._core._logging import get_logger
 from theow._core._models import Rule
 from theow._core._prompts import ERROR, INTRO, TEMPLATES
@@ -21,6 +22,7 @@ from theow._core._tools import (
     make_ephemeral_tools,
     make_search_tools,
     make_signal_tools,
+    make_validation_tools,
 )
 
 if TYPE_CHECKING:
@@ -32,7 +34,11 @@ logger = get_logger(__name__)
 
 
 class Explorer:
-    """Conversational LLM exploration for novel situations."""
+    """Conversational LLM exploration for novel situations.
+
+    The Explorer runs sync at the moment. Conversations are kept blocking.
+    TODO: Move to a fully async design. LOL.
+    """
 
     def __init__(
         self,
@@ -52,7 +58,8 @@ class Explorer:
         self._max_tool_calls = max_tool_calls
         self._max_tokens = max_tokens
         self._session_count = 0
-        self._session_cache: _SessionCache | None = None
+        self._session_cache: SessionCache | None = None
+        self._pending_cleanup: list[Path] = []  # Files to clean up after all retries
 
     def set_gateway(self, gateway: LLMGateway) -> None:
         """Set the LLM gateway (for lazy initialization)."""
@@ -74,7 +81,7 @@ class Explorer:
             - rule: ephemeral Rule for decorator to validate via actual fn() execution
             - explored: True if exploration was attempted (even if no rule produced)
 
-        Does NOT run action or retry here; that's the decorator's job.
+        Does NOT run action or retry here. that's the caller's job.
         """
         if self._gateway is None:
             logger.warning("Exploration disabled", reason="no LLM configured")
@@ -98,7 +105,6 @@ class Explorer:
             return chroma_match, False
 
         self._session_count += 1
-        logger.info("Investigating", session=f"{self._session_count}/{self._session_limit}")
 
         rule, explored = self._run_conversation(
             context, tools, collection, tracing, rejected_attempts, attempt_number
@@ -130,7 +136,7 @@ class Explorer:
         rule = Rule.from_yaml(rule_path)
         captures = rule.matches(context)
         if captures is not None:
-            logger.info("Chroma match", rule=rule_name)
+            logger.debug("Existing rule found", rule=rule_name)
             return rule.bind(captures, context, self._action_registry)
 
         return None
@@ -152,7 +158,8 @@ class Explorer:
         signal_tools = make_signal_tools()
         search_tools = make_search_tools(self._chroma, collection)
         ephemeral_tools = make_ephemeral_tools(self._rules_dir)
-        all_tools = signal_tools + search_tools + ephemeral_tools + tools
+        validation_tools = make_validation_tools(self._rules_dir, context)
+        all_tools = signal_tools + search_tools + ephemeral_tools + validation_tools + tools
 
         tools_section = self._build_tools_section(all_tools)
         intro = INTRO.format(
@@ -164,15 +171,25 @@ class Explorer:
         initial_prompt = intro + "\n" + error_prompt
         messages = [{"role": "user", "content": initial_prompt}]
 
-        logger.info(
-            "Theow --> LLM",
+        logger.debug(
+            "Starting LLM conversation",
+            session=f"{self._session_count}/{self._session_limit}",
             prompt_tokens_est=len(initial_prompt) // 4,
             tools=len(all_tools),
         )
 
-        signal = self._converse(messages, all_tools)
+        # Copilot SDK can't interrupt mid-turn, needs rules_dir to return templates inline
+        if self._gateway:
+            self._gateway.set_gateway_config({"rules_dir": self._rules_dir})
 
-        return self._handle_signal(signal, messages, all_tools, context, collection)
+        signal = self._converse(messages, all_tools)
+        result = self._handle_signal(signal, messages, all_tools, context, collection)
+
+        # Reset gateway state after conversation ends
+        if self._gateway:
+            self._gateway.reset()
+
+        return result
 
     def _converse(
         self,
@@ -216,17 +233,17 @@ class Explorer:
                 orphaned = self._find_orphaned_rules()
                 if orphaned:
                     self._ensure_incomplete_tag(orphaned)
-                    logger.info("Budget exhausted, marked rule as incomplete", rule=orphaned.name)
+                    logger.debug("Budget exhausted, marked rule as incomplete", rule=orphaned.name)
                 else:
-                    logger.warning("Exploration completed without signal")
+                    logger.warning("Exploration stopped unexpectedly")
                 return None, True  # explored=True, no rule to validate
 
             case GiveUp(reason=reason):
-                logger.warning("Exploration declined", reason=reason)
+                logger.warning("Exploration unsuccessful", reason=reason)
                 return None, True
 
             case RequestTemplates():
-                logger.info("Writing rule")
+                logger.debug("Requesting rule creation")
                 templates = TEMPLATES.format(
                     rules_dir=self._rules_dir,
                     actions_dir=self._rules_dir.parent / "actions",
@@ -240,7 +257,7 @@ class Explorer:
                 return rule, True
 
             case _:
-                logger.error("Unknown signal", signal=type(signal).__name__)
+                logger.error("LLM returned unknown signal", signal=type(signal).__name__)
                 return None, True
 
     def _build_error_prompt(
@@ -280,7 +297,7 @@ incomplete rules. Use `list_ephemeral_rules()` to check for work to continue fro
             rejected_section = f"""
 ## Previous Failed Attempts
 
-These rules were tried but did not fix the problem (files deleted, don't try to read them):
+These rules were tried but did not fix the problem:
 {chr(10).join(rejected_lines)}
 
 Try a different approach."""
@@ -317,12 +334,14 @@ Try a different approach."""
             logger.error("Failed to parse rule", error=str(e))
             return None
 
-        # Override collection - don't trust LLM's choice
+        # Override collection
         rule.collection = collection
 
         captures = rule.matches(context)
         if captures is None:
-            logger.error("Rule facts don't match context", rule=rule.name)
+            failed = self._find_failed_fact(rule, context)
+            logger.error("Rule facts don't match context", rule=rule.name, failed_fact=failed)
+            self._track_for_cleanup(rule_path, action_file)
             return None
 
         # Load newly written action file if provided
@@ -334,11 +353,13 @@ Try a different approach."""
         for action in rule.then:
             if not self._action_registry.exists(action.action):
                 logger.error("Action not found", action=action.action)
+                self._track_for_cleanup(rule_path, action_file)
                 return None
 
         conflict = self._check_conflict(rule)
         if conflict:
             logger.error("Rule conflict", conflict=conflict)
+            self._track_for_cleanup(rule_path, action_file)
             return None
 
         # Track created files for cleanup on rejection
@@ -354,7 +375,7 @@ Try a different approach."""
 
         # Don't index ephemeral rules - they get indexed when promoted
         # This avoids ghost entries if validation fails or process crashes
-        logger.info("Rule validated", rule=rule.name)
+        logger.debug("Rule validated", rule=rule.name)
 
         return bound_rule
 
@@ -418,6 +439,19 @@ Try a different approach."""
             lines.append(f"- `{name}({params})` - {first_line}")
         return "\n".join(lines)
 
+    def _find_failed_fact(self, rule: Rule, context: dict[str, Any]) -> str:
+        """Find which fact failed to match for debugging."""
+        for fact in rule.when:
+            value = context.get(fact.fact)
+            if fact.matches(value) is None:
+                if value is None:
+                    return f"{fact.fact} (missing from context)"
+                # Truncate long values for readable logs
+                preview = str(value)[:80] + "..." if len(str(value)) > 80 else str(value)
+                condition = fact.equals or fact.contains or fact.regex or "exists"
+                return f"{fact.fact}={preview!r} vs {condition!r}"
+        return "unknown"
+
     def _same_when(self, a: Rule, b: Rule) -> bool:
         return a.when == b.when
 
@@ -425,11 +459,7 @@ Try a different approach."""
         return a.then == b.then
 
     def _extract_query_text(self, context: dict[str, Any]) -> str:
-        longest = ""
-        for value in context.values():
-            if isinstance(value, str) and len(value) > len(longest):
-                longest = value
-        return longest
+        return extract_query_text(context)
 
     def run_direct(
         self,
@@ -437,32 +467,34 @@ Try a different approach."""
         tools: list[Callable[..., Any]],
         budget: dict[str, Any],
     ) -> bool:
-        """Run direct fix conversation (for probabilistic rules).
+        """Run LLM action conversation (for probabilistic rules).
 
         Returns True if LLM signaled Done, False otherwise.
         """
         if self._gateway is None:
-            logger.warning("Cannot run direct fix: no LLM configured")
+            logger.warning("Cannot run LLM action: no LLM configured")
             return False
 
-        # Add signal tools (give_up, done)
         all_tools = make_direct_fix_tools() + tools
 
         messages = [{"role": "user", "content": prompt}]
         signal = self._converse(messages, all_tools, budget)
 
+        if self._gateway:
+            self._gateway.reset()
+
         match signal:
             case Done(message=message):
-                logger.info("Direct fix completed", message=message)
+                logger.debug("LLM action completed", message=message)
                 return True
             case GiveUp(reason=reason):
-                logger.warning("Direct fix gave up", reason=reason)
+                logger.warning("LLM action unsuccessful", reason=reason)
                 return False
             case None:
-                logger.warning("Direct fix exhausted budget without signal")
+                logger.warning("LLM action exhausted budget without signal")
                 return False
             case _:
-                logger.warning("Unexpected signal in direct fix", signal=type(signal).__name__)
+                logger.warning("LLM returned unknown signal", signal=type(signal).__name__)
                 return False
 
     @property
@@ -473,6 +505,41 @@ Try a different approach."""
         self._session_count = 0
         if self._session_cache:
             self._session_cache.clear()
+        self._pending_cleanup = []
 
+    def _track_for_cleanup(self, rule_path: Path, action_file: str | None) -> None:
+        """Track files for cleanup after all retries."""
+        if rule_path.exists():
+            self._pending_cleanup.append(rule_path)
+        if action_file:
+            action_path = Path(action_file)
+            if action_path.exists():
+                self._pending_cleanup.append(action_path)
 
-_SessionCache = Any
+    def cleanup(self, rejected_attempts: list[dict[str, Any]] | None = None) -> None:
+        """Clean up all tracked files after retries exhausted.
+
+        Handles both:
+        - Files from rules that failed validation (tracked internally)
+        - Files from rules that were valid but didn't fix the problem (passed in)
+
+        Skips incomplete rules - those are kept for cross-session continuation.
+        """
+        # Clean up files from rejected attempts (valid rules that didn't fix the problem)
+        if rejected_attempts:
+            for rejection in rejected_attempts:
+                if rejection.get("_incomplete"):
+                    continue
+                for path in rejection.get("_files", []):
+                    if path.exists():
+                        file_type = "Action" if path.suffix == ".py" else "Rule"
+                        path.unlink()
+                        logger.debug(f"{file_type} file deleted", path=str(path))
+
+        # Clean up files from failed validations
+        for path in self._pending_cleanup:
+            if path.exists():
+                file_type = "Action" if path.suffix == ".py" else "Rule"
+                path.unlink()
+                logger.debug(f"{file_type} file deleted", path=str(path))
+        self._pending_cleanup = []

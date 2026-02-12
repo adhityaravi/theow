@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from theow._core._chroma_store import ChromaStore
 
 
+# Signals that a LLM can raise for theow to intercept and guide.
 class ExplorationSignal(Exception):
     """Base for all exploration signals."""
 
@@ -50,8 +51,6 @@ class Done(ExplorationSignal):
 
 
 # Signal tool functions (module-level for reuse)
-
-
 def _give_up(reason: str) -> None:
     """Signal that this problem cannot or should not be automated.
 
@@ -95,9 +94,7 @@ def _done(message: str = "") -> None:
     raise Done(message)
 
 
-# Factory functions for tool sets
-
-
+# Factory functions for internal tool sets
 def make_signal_tools() -> list[Callable[..., Any]]:
     """Signal tools for explorer mode (rule creation)."""
     return [_give_up, _request_templates, _submit_rule]
@@ -139,6 +136,66 @@ def make_search_tools(chroma: ChromaStore, collection: str) -> list[Callable[...
         return chroma.list_actions()
 
     return [search_rules, search_actions, list_rules, list_actions]
+
+
+def make_validation_tools(rules_dir: Path, context: dict[str, Any]) -> list[Callable[..., Any]]:
+    """Create tools for validating rules against current context."""
+    from theow._core._models import Rule
+
+    def test_rule_match(rule_file: str) -> dict[str, Any]:
+        """Test if a rule's when-facts match the current error context.
+
+        Call this BEFORE submit_rule() to verify your patterns are correct.
+        Returns which facts match and which fail, with actual vs expected values.
+
+        Args:
+            rule_file: Path to the rule file to test.
+        """
+        path = Path(rule_file)
+        if not path.exists():
+            return {"error": f"Rule file not found: {rule_file}"}
+
+        try:
+            rule = Rule.from_yaml(path)
+        except Exception as e:
+            return {"error": f"Failed to parse rule: {e}"}
+
+        results = []
+        all_match = True
+
+        for fact in rule.when:
+            value = context.get(fact.fact)
+            match_result = fact.matches(value)
+
+            if match_result is None:
+                all_match = False
+                # Show what we expected vs what we got
+                condition = fact.equals or fact.contains or fact.regex
+                actual = str(value)[:200] if value else "(missing)"
+                results.append(
+                    {
+                        "fact": fact.fact,
+                        "status": "FAIL",
+                        "expected": condition,
+                        "actual": actual + "..." if value and len(str(value)) > 200 else actual,
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "fact": fact.fact,
+                        "status": "OK",
+                        "captures": match_result if match_result else None,
+                    }
+                )
+
+        return {
+            "matches": all_match,
+            "facts": results,
+            "hint": "Fix failing facts before calling submit_rule()" if not all_match else None,
+        }
+
+    return [test_rule_match]
 
 
 def make_ephemeral_tools(rules_dir: Path) -> list[Callable[..., Any]]:
@@ -185,12 +242,39 @@ def make_ephemeral_tools(rules_dir: Path) -> list[Callable[..., Any]]:
             return f"Error: Ephemeral rule '{name}' not found"
         return path.read_text()
 
-    return [list_ephemeral_rules, read_ephemeral_rule]
+    def write_rule(name: str, content: str) -> dict[str, str]:
+        """Write a rule file to the ephemeral folder.
+
+        Args:
+            name: Rule name (without extension). Will be saved as <name>.rule.yaml
+            content: YAML content of the rule.
+
+        Returns dict with 'path' for use with test_rule_match() and submit_rule().
+        """
+        ephemeral_dir.mkdir(parents=True, exist_ok=True)
+        path = ephemeral_dir / f"{name}.rule.yaml"
+        path.write_text(content)
+        return {"path": str(path), "message": f"Rule written to {path}"}
+
+    def write_action(name: str, content: str) -> dict[str, str]:
+        """Write an action file to the actions folder.
+
+        Args:
+            name: Action name (without extension). Will be saved as <name>.py
+            content: Python content of the action.
+
+        Returns dict with 'path' for use with submit_rule().
+        """
+        actions_dir = rules_dir.parent / "actions"
+        actions_dir.mkdir(parents=True, exist_ok=True)
+        path = actions_dir / f"{name}.py"
+        path.write_text(content)
+        return {"path": str(path), "message": f"Action written to {path}"}
+
+    return [list_ephemeral_rules, read_ephemeral_rule, write_rule, write_action]
 
 
 # Theow external tools for consumers. Not registered by default, consumers can choose to register them.
-
-
 def read_file(path: str) -> str:
     """Read file contents."""
     return Path(path).read_text()

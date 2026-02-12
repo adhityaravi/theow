@@ -49,7 +49,7 @@ def test_anthropic_gateway_build_declarations():
                 """Read a file."""
                 return ""
 
-            declarations = gateway._build_declarations([my_tool])
+            declarations = gateway._build_tool_declarations([my_tool])
 
             assert len(declarations) == 1
             assert declarations[0]["name"] == "my_tool"

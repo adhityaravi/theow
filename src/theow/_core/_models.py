@@ -49,7 +49,6 @@ class Fact:
                 return match.groupdict()
             return None
 
-        # No condition specified - fact just needs to exist
         return {}
 
     def to_dict(self) -> dict[str, Any]:
@@ -68,12 +67,22 @@ class Fact:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Fact:
         """Create Fact from dictionary."""
+        # Normalize examples - YAML may parse multi-line strings with colons as dicts
+        raw_examples = data.get("examples", [])
+        examples = []
+        for ex in raw_examples:
+            if isinstance(ex, dict):
+                # Convert dict back to multi-line string: "key: value\nkey2: value2"
+                examples.append("\n".join(f"{k}: {v}" for k, v in ex.items()))
+            else:
+                examples.append(str(ex))
+
         return cls(
             fact=data["fact"],
             equals=data.get("equals"),
             contains=data.get("contains"),
             regex=data.get("regex"),
-            examples=data.get("examples", []),
+            examples=examples,
         )
 
 

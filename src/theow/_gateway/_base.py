@@ -2,13 +2,73 @@
 
 from __future__ import annotations
 
+import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from theow._core._logging import get_logger
+from theow._core._tools import ExplorationSignal
 
 logger = get_logger(__name__)
+
+# Type mapping for JSON schema generation
+TYPE_MAP = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+    list: "array",
+    dict: "object",
+}
+
+
+def build_tool_declaration(
+    name: str,
+    fn: Callable[..., Any],
+    schema_key: str = "input_schema",
+) -> dict[str, Any]:
+    """Convert a Python callable to a JSON schema tool declaration.
+
+    Args:
+        name: Tool name to use in the declaration.
+        fn: The callable to introspect.
+        schema_key: Key for the schema dict ("input_schema" for Anthropic, "parameters" for others).
+
+    Returns:
+        Tool declaration dict with name, description, and schema.
+    """
+    sig = inspect.signature(fn)
+    doc = inspect.getdoc(fn) or ""
+
+    properties: dict[str, dict[str, str]] = {}
+    required: list[str] = []
+
+    for param_name, param in sig.parameters.items():
+        if param_name in ("self", "cls"):
+            continue
+
+        if param.annotation != inspect.Parameter.empty:
+            origin = getattr(param.annotation, "__origin__", param.annotation)
+            param_type = TYPE_MAP.get(origin, "string")
+        else:
+            param_type = "string"
+
+        properties[param_name] = {"type": param_type}
+
+        if param.default == inspect.Parameter.empty:
+            required.append(param_name)
+
+    return {
+        "name": name,
+        "description": doc,
+        schema_key: {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        },
+    }
+
 
 # Budget configuration
 SOFT_LIMIT_RATIO = 0.8  # Warn at 80% of budget
@@ -58,6 +118,20 @@ class LLMGateway(ABC):
         """Single generation, optionally with structured output."""
         ...
 
+    def reset(self) -> None:
+        """Reset gateway state after conversation ends.
+
+        Override in stateful gateways (e.g., Copilot) to clean up sessions.
+        Stateless gateways (Anthropic, Gemini) can use this default noop.
+        """
+        pass
+
+    def set_gateway_config(self, config: dict[str, Any]) -> None:
+        """Set gateway-specific config. Only applies if gateway has _gateway_config."""
+        gateway_config = getattr(self, "_gateway_config", None)
+        if isinstance(gateway_config, dict):
+            gateway_config.update(config)
+
     def check_budget_warning(
         self,
         state: SessionState,
@@ -77,12 +151,59 @@ class LLMGateway(ABC):
 
         remaining = max_calls - state.tool_calls
         state.warned_about_budget = True
-        logger.info("Budget warning triggered", remaining=remaining, max_calls=max_calls)
+        logger.debug("Budget warning triggered", remaining=remaining, max_calls=max_calls)
 
         return (
-            f"⚠️ BUDGET WARNING: You have {remaining} tool calls remaining "
-            f"(out of {max_calls}). Wrap up now.\n\n"
-            f"If you have a fix: call request_templates() then submit_rule().\n\n"
-            f"If you can't finish: submit with tags: [incomplete] and add a 'notes' field. "
-            f"The next attempt can continue from there."
+            f"NOTE: {remaining} tool calls remaining. Start wrapping up, but don't rush.\n\n"
+            f"Quality matters more than speed. Write a GENERIC solution that works for "
+            f"similar errors, not just this specific case. Avoid hardcoding package names or paths.\n\n"
+            f"If you have a fix: request_templates() → write_rule/action → test_rule_match → submit_rule.\n\n"
+            f"If you can't write a proper generic solution: use tags: [incomplete] and add notes. "
+            f"The next attempt will continue from there."
         )
+
+    def _build_tool_map(self, tools: list[Callable[..., Any]]) -> dict[str, Callable[..., Any]]:
+        """Create name → function mapping from tools list."""
+        return {getattr(fn, "__name__", str(id(fn))): fn for fn in tools}
+
+    def _extract_budget(self, budget: dict[str, Any]) -> tuple[int, int]:
+        """Extract budget params with defaults.
+
+        Returns:
+            (max_tool_calls, max_tokens) tuple.
+        """
+        max_calls = budget.get("max_tool_calls", 30)
+        max_tokens = budget.get("max_tokens", 8192)
+        return max_calls, max_tokens
+
+    def _execute_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        tool_map: dict[str, Callable[..., Any]],
+    ) -> tuple[Any, bool]:
+        """Execute a single tool by name.
+
+        Args:
+            name: Tool function name.
+            args: Arguments to pass to the tool.
+            tool_map: Mapping of tool names to functions.
+
+        Returns:
+            (result, is_error) tuple.
+
+        Raises:
+            ExplorationSignal: If the tool raises a signal (Done, GiveUp, etc.).
+        """
+        fn = tool_map.get(name)
+        if not fn:
+            return {"error": f"Unknown tool: {name}"}, True
+
+        try:
+            result = fn(**args)
+            return result, False
+        except ExplorationSignal:
+            raise
+        except Exception as e:
+            logger.warning("Tool execution failed", tool=name, error=str(e))
+            return {"error": str(e)}, True

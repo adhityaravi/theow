@@ -56,9 +56,14 @@ TEMPLATES = """## Rule & Action Templates
 
 Now write a rule that captures the GENERAL pattern (not just this specific case).
 
+### CRITICAL: Verify Before Writing
+
+Before writing `when` facts, confirm the actual field values from the error context above.
+Your `contains` and `regex` patterns must match text that ACTUALLY EXISTS in those fields.
+
 ### Rule Structure
 
-Write to `{rules_dir}/ephemeral/<name>.rule.yaml`:
+Use `write_rule(name, content)` with this YAML structure:
 
 ```yaml
 name: descriptive_snake_case
@@ -100,7 +105,7 @@ notes: |  # Optional - document findings if incomplete
 
 ### Action Structure (if needed)
 
-Write to `{actions_dir}/<name>.py`:
+Use `write_action(name, content)` with this Python structure:
 
 ```python
 from theow import action
@@ -116,5 +121,10 @@ def action_name(workspace: str, expected: str) -> dict:
 - Keep actions succinct and readable. Compose long functions into smaller helpers.
 - Solve the problem generically. NEVER hardcode package names or versions.
 
-Write the rule file (and action if needed), then call `submit_rule(rule_file, action_file)`.
+**Workflow:**
+1. `write_rule(name, content)` → returns path in result
+2. `write_action(name, content)` if needed → returns path in result
+3. `test_rule_match(rule_path)` to verify patterns match context
+4. Fix any failing facts and rewrite
+5. `submit_rule(rule_path, action_path)`
 """

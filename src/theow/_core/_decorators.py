@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, ParamSpec, TypeVar
 
-from theow._core._logging import get_logger
+from theow._core._logging import get_engine_name, get_logger
+from theow._gateway._base import build_tool_declaration
 
 if TYPE_CHECKING:
     from theow._core._models import Rule
@@ -55,49 +56,10 @@ class ToolRegistry:
 
     def get_declarations(self) -> list[dict[str, Any]]:
         """Generate LLM function schemas from type hints."""
-        return [_build_function_declaration(name, fn) for name, fn in self._tools.items()]
-
-
-def _build_function_declaration(name: str, fn: Callable[..., Any]) -> dict[str, Any]:
-    sig = inspect.signature(fn)
-    doc = inspect.getdoc(fn) or ""
-
-    properties: dict[str, dict[str, str]] = {}
-    required: list[str] = []
-
-    type_map = {
-        str: "string",
-        int: "integer",
-        float: "number",
-        bool: "boolean",
-        list: "array",
-        dict: "object",
-    }
-
-    for param_name, param in sig.parameters.items():
-        if param_name in ("self", "cls"):
-            continue
-
-        if param.annotation != inspect.Parameter.empty:
-            origin = getattr(param.annotation, "__origin__", param.annotation)
-            param_type = type_map.get(origin, "string")
-        else:
-            param_type = "string"
-
-        properties[param_name] = {"type": param_type}
-
-        if param.default == inspect.Parameter.empty:
-            required.append(param_name)
-
-    return {
-        "name": name,
-        "description": doc,
-        "parameters": {
-            "type": "object",
-            "properties": properties,
-            "required": required,
-        },
-    }
+        return [
+            build_tool_declaration(name, fn, schema_key="parameters")
+            for name, fn in self._tools.items()
+        ]
 
 
 class ActionRegistry:
@@ -157,10 +119,6 @@ class ActionRegistry:
                             if action_name:
                                 namespace: dict[str, Any] = {"action": action}
                                 exec(compile(tree, path, "exec"), namespace)
-                                if action_name in self._actions:
-                                    logger.debug(
-                                        "Discovered action", action=action_name, path=str(path)
-                                    )
         except Exception as e:
             logger.warning("Failed to load actions", path=str(path), error=str(e))
 
@@ -288,8 +246,6 @@ class MarkDecorator:
         for attempt in range(config.max_retries + 1):
             try:
                 result = fn(*args, **kwargs)
-
-                # Success! If we applied an ephemeral rule, promote it
                 if last_applied_rule and last_applied_rule.is_ephemeral:
                     self._promote_rule(last_applied_rule)
 
@@ -297,9 +253,7 @@ class MarkDecorator:
 
             except Exception as exc:
                 last_exception = exc
-                logger.debug("Attempt failed", attempt=attempt + 1, error=str(exc))
-
-                # If we applied an ephemeral rule and it failed, reject it
+                logger.info("Failure captured", attempt=attempt + 1, error=str(exc))
                 if last_applied_rule and last_applied_rule.is_ephemeral:
                     rejected_attempts.append(self._reject_rule(last_applied_rule, exc))
                     last_applied_rule = None
@@ -325,8 +279,14 @@ class MarkDecorator:
                         break
                 last_applied_rule = rule
             except Exception as theow_err:
-                logger.error("Theow internal error", error=str(theow_err))
+                logger.error(f"{get_engine_name()} internal error", error=str(theow_err))
                 break
+
+        # Clean up ephemeral files after all retries exhausted
+        try:
+            self._explorer.cleanup(rejected_attempts)
+        except Exception as cleanup_err:
+            logger.error("Cleanup failed", error=str(cleanup_err))
 
         if last_exception:
             raise last_exception
@@ -399,16 +359,13 @@ class MarkDecorator:
         )
 
     def _try_resolve(self, context: dict[str, Any], config: MarkConfig) -> Rule | None:
-        rule = self._resolver.resolve(
+        return self._resolver.resolve(
             context=context,
             collection=config.collection,
             rules=config.rules,
             tags=config.tags,
             fallback=config.fallback,
         )
-        if rule:
-            logger.info("Resolved rule", rule=rule.name)
-        return rule
 
     def _should_explore(self, config: MarkConfig) -> bool:
         return config.explorable and os.environ.get("THEOW_EXPLORE") == "1"
@@ -446,11 +403,12 @@ class MarkDecorator:
         )
 
         if rule:
-            logger.info("Explored rule", rule=rule.name, ephemeral=rule.is_ephemeral)
+            logger.debug("Ephemeral rule created", rule=rule.name)
         return rule, explored
 
     def _execute_rule(self, rule: Rule, context: dict[str, Any] | None = None) -> bool:
         """Execute rule's action (deterministic) or run LLM (probabilistic)."""
+        logger.info("Attempting recovery", rule=rule.name)
         try:
             if rule.type == "probabilistic":
                 return self._execute_probabilistic_rule(rule, context or {})
@@ -464,7 +422,7 @@ class MarkDecorator:
     def _execute_probabilistic_rule(self, rule: Rule, context: dict[str, Any]) -> bool:
         """Execute a probabilistic rule by running LLM with the configured prompt."""
         if not rule.llm_config:
-            logger.error("Probabilistic rule missing llm_config", rule=rule.name)
+            logger.error("Bad rule config", rule=rule.name, error="missing llm_config")
             return False
 
         # Get prompt with placeholders replaced
@@ -481,58 +439,52 @@ class MarkDecorator:
             if tool_fn:
                 tools.append(tool_fn)
             else:
-                logger.warning("Tool not found for probabilistic rule", tool=tool_name)
+                logger.warning("Tool not found", tool=tool_name)
 
         budget = {
             "max_tool_calls": rule.llm_config.constraints.get("max_tool_calls", 10),
             "max_tokens": rule.llm_config.constraints.get("max_tokens", 4096),
         }
 
-        logger.info("Executing probabilistic rule", rule=rule.name)
+        logger.debug("Executing LLM action", rule=rule.name)
         return self._explorer.run_direct(prompt, tools, budget)
 
     def _promote_rule(self, rule: Rule) -> None:
         """Promote ephemeral rule to permanent after fn() succeeds."""
-        logger.info("Promoting rule", rule=rule.name)
+        logger.debug("Promoting rule", rule=rule.name)
 
-        # Remove incomplete tag if present
         if "incomplete" in rule.tags:
             rule.tags.remove("incomplete")
 
-        # Move from ephemeral/ to main rules folder
-        if rule._source_path and "ephemeral" in str(rule._source_path):
-            new_path = rule._source_path.parent.parent / rule._source_path.name
-            rule._source_path.rename(new_path)
-            rule._source_path = new_path
+        try:
+            if rule._source_path and "ephemeral" in str(rule._source_path):
+                new_path = rule._source_path.parent.parent / rule._source_path.name
+                rule._source_path.rename(new_path)
+                rule._source_path = new_path
 
-        if rule._source_path and rule._source_path.exists():
-            rule.to_yaml(rule._source_path)
+            if rule._source_path and rule._source_path.exists():
+                rule.to_yaml(rule._source_path)
 
-        self._explorer._chroma.index_rule(rule)
+            self._explorer._chroma.index_rule(rule)
+        except Exception as e:
+            logger.warning("Failed to promote rule", rule=rule.name, error=str(e))
 
     def _reject_rule(self, rule: Rule, exc: Exception) -> dict[str, Any]:
-        """Reject ephemeral rule after fn() fails. Returns info for LLM feedback."""
-        logger.warning("Rejecting ephemeral rule", rule=rule.name, error=str(exc))
+        """Reject ephemeral rule after fn() fails. Returns info for LLM feedback.
 
-        # Include rule details so LLM knows what was tried without needing to read deleted files
-        rejection = {
-            "rule_name": rule.name,
-            "description": rule.description[:200] if rule.description else "",
-            "error": str(exc)[:500],
-        }
+        Files are NOT deleted here - they're kept so subsequent attempts can
+        read them via list_ephemeral_rules(). Cleanup happens after all retries.
+        """
+        logger.warning("Rejecting ephemeral rule", rule=rule.name, error=str(exc))
 
         # Invalidate session cache so we don't return this rule again
         if self._explorer._session_cache:
             self._explorer._session_cache.invalidate(rule.name)
 
-        # Don't delete incomplete rules - keep for next attempt
-        if "incomplete" in rule.tags:
-            logger.info("Keeping incomplete rule for next attempt", rule=rule.name)
-            return rejection
-
-        for path in rule._created_files:
-            if path.exists():
-                path.unlink()
-                logger.debug("Deleted file", path=str(path))
-
-        return rejection
+        return {
+            "rule_name": rule.name,
+            "description": rule.description[:200] if rule.description else "",
+            "error": str(exc)[:500],
+            "_files": list(rule._created_files),
+            "_incomplete": "incomplete" in rule.tags,
+        }

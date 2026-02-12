@@ -1,17 +1,26 @@
-"""Anthropic LLM gateway implementation."""
+"""Anthropic LLM gateway implementation.
+
+Anthropic gateway currently follows a Theow native approach for conversation.
+Anthropic's models act as pure brains, with Theow being the hands managing the conversation flow and tool execution.
+This lets Theow have a leash on the model's behavior and ensures consistent handling of tool calls and budget across providers.
+"""
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 from typing import Any, Callable
 
 import anthropic
 
-from theow._core._logging import get_logger
+from theow._core._logging import get_engine_name, get_logger
 from theow._core._tools import ExplorationSignal
-from theow._gateway._base import ConversationResult, LLMGateway, SessionState
+from theow._gateway._base import (
+    ConversationResult,
+    LLMGateway,
+    SessionState,
+    build_tool_declaration,
+)
 
 logger = get_logger(__name__)
 
@@ -37,10 +46,9 @@ class AnthropicGateway(LLMGateway):
         Messages list is modified in-place.
         Raises ExplorationSignal subclasses when LLM calls signal tools.
         """
-        max_calls = budget.get("max_tool_calls", 30)
-        max_tokens = budget.get("max_tokens", 8192)
-        tool_map = {getattr(fn, "__name__", str(id(fn))): fn for fn in tools}
-        declarations = self._build_declarations(tools)
+        max_calls, max_tokens = self._extract_budget(budget)
+        tool_map = self._build_tool_map(tools)
+        declarations = self._build_tool_declarations(tools)
 
         state = SessionState()
 
@@ -49,12 +57,12 @@ class AnthropicGateway(LLMGateway):
             if response is None:
                 break
 
-            tool_uses = self._extract_tool_uses(response, messages)
-            if not tool_uses:
+            tool_calls = self._extract_tool_calls(response, messages)
+            if not tool_calls:
                 break
 
             # Execute tools - may raise ExplorationSignal
-            self._execute_tools(tool_uses, tool_map, messages, state)
+            self._execute_tool_calls(tool_calls, tool_map, messages, state)
 
             # Check for budget warning after tool execution
             warning = self.check_budget_warning(state, max_calls)
@@ -75,7 +83,12 @@ class AnthropicGateway(LLMGateway):
         state: SessionState,
     ) -> anthropic.types.Message | None:
         """Send conversation to Claude, update token count."""
-        logger.debug("Theow --> LLM", turn=state.tool_calls, model=self._model)
+        logger.debug(
+            f"{get_engine_name()} --> LLM",
+            provider="anthropic",
+            turn=state.tool_calls,
+            model=self._model,
+        )
         try:
             response = self._client.messages.create(
                 model=self._model,
@@ -90,11 +103,13 @@ class AnthropicGateway(LLMGateway):
         state.tokens_used += response.usage.input_tokens + response.usage.output_tokens
         tool_names = [b.name for b in response.content if hasattr(b, "name")]
         logger.debug(
-            "Theow <-- LLM", tools=tool_names or ["text"], tokens=response.usage.output_tokens
+            f"{get_engine_name()} <-- LLM",
+            tools=tool_names or ["text"],
+            tokens=response.usage.output_tokens,
         )
         return response
 
-    def _extract_tool_uses(
+    def _extract_tool_calls(
         self,
         response: anthropic.types.Message,
         messages: list[dict[str, Any]],
@@ -103,9 +118,9 @@ class AnthropicGateway(LLMGateway):
         messages.append({"role": "assistant", "content": response.content})
         return [b for b in response.content if b.type == "tool_use"]
 
-    def _execute_tools(
+    def _execute_tool_calls(
         self,
-        tool_uses: list[Any],
+        tool_calls: list[Any],
         tool_map: dict[str, Callable[..., Any]],
         messages: list[dict[str, Any]],
         state: SessionState,
@@ -114,7 +129,7 @@ class AnthropicGateway(LLMGateway):
         tool_results: list[dict[str, Any]] = []
         signal_to_raise: ExplorationSignal | None = None
 
-        for block in tool_uses:
+        for block in tool_calls:
             state.tool_calls += 1
             if signal_to_raise:
                 # Already got a signal, add placeholder for remaining tools
@@ -128,7 +143,7 @@ class AnthropicGateway(LLMGateway):
                 continue
 
             try:
-                result = self._execute_single(block.name, block.input, block.id, tool_map)
+                result = self._format_tool_result(block.name, block.input, block.id, tool_map)
                 tool_results.append(result)
             except ExplorationSignal as sig:
                 # Capture signal, add result for this tool, continue to collect all
@@ -146,40 +161,28 @@ class AnthropicGateway(LLMGateway):
         if signal_to_raise:
             raise signal_to_raise
 
-    def _execute_single(
+    def _format_tool_result(
         self,
         name: str,
         input_args: Any,
         tool_use_id: str,
         tool_map: dict[str, Callable[..., Any]],
     ) -> dict[str, Any]:
-        """Execute one tool. ExplorationSignal propagates up."""
-        fn = tool_map.get(name)
-        if not fn:
-            return {
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": json.dumps({"error": f"Unknown tool: {name}"}),
-                "is_error": True,
-            }
-
+        """Execute tool and format result for Anthropic API."""
         args = input_args if isinstance(input_args, dict) else {}
+        result, is_error = self._execute_tool(name, args, tool_map)
 
-        try:
-            result = fn(**args)
-            content = json.dumps(result) if not isinstance(result, str) else result
-            return {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
-        except ExplorationSignal:
-            # Let signals propagate - explorer handles them
-            raise
-        except Exception as e:
-            logger.warning("Tool failed", tool=name, error=str(e))
+        if is_error:
+            content = json.dumps(result) if isinstance(result, dict) else str(result)
             return {
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
-                "content": str(e),
+                "content": content,
                 "is_error": True,
             }
+
+        content = json.dumps(result) if not isinstance(result, str) else result
+        return {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
 
     def generate(
         self,
@@ -222,50 +225,13 @@ class AnthropicGateway(LLMGateway):
 
         return {}
 
-    def _build_declarations(self, tools: list[Callable[..., Any]]) -> list[dict[str, Any]]:
+    def _build_tool_declarations(self, tools: list[Callable[..., Any]]) -> list[dict[str, Any]]:
         """Convert Python callables to Anthropic tool declarations."""
-        type_map = {
-            str: "string",
-            int: "integer",
-            float: "number",
-            bool: "boolean",
-            list: "array",
-            dict: "object",
-        }
-
-        declarations = []
-        for fn in tools:
-            sig = inspect.signature(fn)
-            doc = inspect.getdoc(fn) or ""
-
-            properties: dict[str, Any] = {}
-            required: list[str] = []
-
-            for name, param in sig.parameters.items():
-                if name in ("self", "cls"):
-                    continue
-
-                if param.annotation != inspect.Parameter.empty:
-                    origin = getattr(param.annotation, "__origin__", param.annotation)
-                    param_type = type_map.get(origin, "string")
-                else:
-                    param_type = "string"
-
-                properties[name] = {"type": param_type}
-
-                if param.default == inspect.Parameter.empty:
-                    required.append(name)
-
-            declarations.append(
-                {
-                    "name": getattr(fn, "__name__", str(id(fn))),
-                    "description": doc,
-                    "input_schema": {
-                        "type": "object",
-                        "properties": properties,
-                        "required": required,
-                    },
-                }
+        return [
+            build_tool_declaration(
+                name=getattr(fn, "__name__", str(id(fn))),
+                fn=fn,
+                schema_key="input_schema",
             )
-
-        return declarations
+            for fn in tools
+        ]

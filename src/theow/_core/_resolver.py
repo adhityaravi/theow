@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from theow._core._chroma_store import extract_query_text
 from theow._core._logging import get_logger
 from theow._core._models import Rule
 
@@ -46,14 +47,12 @@ class Resolver:
         """
         logger.debug("Resolving context", collection=collection)
 
-        # Try explicit rules first
         if rules:
             for rule_name in rules:
                 rule = self._try_rule(rule_name, context, collection)
                 if rule:
                     return rule
 
-        # Try tag-based matching
         if tags:
             candidates = self._find_by_tags(collection, tags)
             for rule_name in candidates:
@@ -61,7 +60,6 @@ class Resolver:
                 if rule:
                     return rule
 
-        # Fall back to vector search
         if fallback:
             return self._vector_search(context, collection)
 
@@ -92,7 +90,6 @@ class Resolver:
             logger.debug("Rule facts not matched", rule=rule.name)
             return None
 
-        logger.debug("Rule matched", rule=rule.name)
         return rule.bind(captures, context, self._action_registry)
 
     def _find_by_tags(self, collection: str, tags: list[str]) -> list[str]:
@@ -164,13 +161,7 @@ class Resolver:
 
     def _extract_query_text(self, context: dict[str, Any]) -> str:
         """Extract query text from context (longest string value)."""
-        longest = ""
-
-        for value in context.values():
-            if isinstance(value, str) and len(value) > len(longest):
-                longest = value
-
-        return longest
+        return extract_query_text(context)
 
     def _load_rule(self, name: str, collection: str) -> Rule | None:
         """Load rule from cache or file."""
