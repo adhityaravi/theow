@@ -37,6 +37,8 @@ class Resolver:
         rules: list[str] | None = None,
         tags: list[str] | None = None,
         fallback: bool = True,
+        n_results: int = 10,
+        exclude_rules: list[str] | None = None,
     ) -> Rule | None:
         """Match context against rules and return first match.
 
@@ -44,11 +46,23 @@ class Resolver:
         1. Explicit rules by name (if specified)
         2. Rules matching tags (if specified)
         3. Vector search fallback (if enabled)
+
+        Args:
+            context: The failure context to match against.
+            collection: The rule collection to search.
+            rules: Explicit rule names to try first.
+            tags: Tags to filter rules by.
+            fallback: Whether to use vector search if no explicit match.
+            n_results: Max number of candidates to retrieve from vector search.
+            exclude_rules: Rule names to skip (already tried and failed).
         """
         logger.debug("Resolving context", collection=collection)
+        exclude_set = set(exclude_rules or [])
 
         if rules:
             for rule_name in rules:
+                if rule_name in exclude_set:
+                    continue
                 rule = self._try_rule(rule_name, context, collection)
                 if rule:
                     return rule
@@ -56,12 +70,14 @@ class Resolver:
         if tags:
             candidates = self._find_by_tags(collection, tags)
             for rule_name in candidates:
+                if rule_name in exclude_set:
+                    continue
                 rule = self._try_rule(rule_name, context, collection)
                 if rule:
                     return rule
 
         if fallback:
-            return self._vector_search(context, collection)
+            return self._vector_search(context, collection, n_results, exclude_set)
 
         return None
 
@@ -109,22 +125,25 @@ class Resolver:
         self,
         context: dict[str, Any],
         collection: str,
+        n_results: int = 10,
+        exclude_rules: set[str] | None = None,
     ) -> Rule | None:
         """Find matching rule via vector similarity search."""
         metadata_filter = self._extract_metadata_filter(context)
         query_text = self._extract_query_text(context)
+        exclude_set = exclude_rules or set()
 
         if not query_text:
             logger.debug("No query text in context")
             return None
 
-        logger.debug("Vector search", query=query_text[:50])
+        logger.debug("Vector search", query=query_text[:50], n_results=n_results)
 
         results = self._chroma.query_rules(
             collection=collection,
             query_text=query_text,
             metadata_filter=metadata_filter,
-            n_results=10,
+            n_results=n_results + len(exclude_set),  # Fetch extra to account for exclusions
         )
 
         # Sort results: deterministic rules first, probabilistic last
@@ -136,6 +155,10 @@ class Resolver:
         results = sorted(results, key=rule_priority)
 
         for rule_name, distance, metadata in results:
+            if rule_name in exclude_set:
+                logger.debug("Skipping excluded rule", rule=rule_name)
+                continue
+
             logger.debug("Candidate rule", rule=rule_name, distance=f"{distance:.3f}")
 
             rule = self._load_rule(rule_name, collection)

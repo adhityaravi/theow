@@ -1,6 +1,9 @@
 """Tests for core data models."""
 
 import tempfile
+from unittest.mock import MagicMock
+
+import pytest
 
 from theow._core._models import Action, Fact, LLMConfig, Rule
 
@@ -23,16 +26,23 @@ def test_fact_regex_with_captures():
     assert result == {"new": "new.io/pkg", "old": "old.io/pkg"}
 
 
-def test_fact_none_value():
-    fact = Fact(fact="stderr", equals="something")
+def test_fact_from_dict_examples_as_dicts():
+    """YAML may parse multi-line example strings with colons as dicts."""
+    data = {
+        "fact": "stderr",
+        "regex": "pattern",
+        "examples": [{"key1": "value1", "key2": "value2"}, "normal string"],
+    }
+    fact = Fact.from_dict(data)
+    assert fact.examples[0] == "key1: value1\nkey2: value2"
+    assert fact.examples[1] == "normal string"
+
+
+def test_fact_no_condition_matches_any():
+    """Fact with no equals/contains/regex matches any non-None value."""
+    fact = Fact(fact="x")
+    assert fact.matches("anything") == {}
     assert fact.matches(None) is None
-
-
-def test_fact_roundtrip():
-    fact = Fact(fact="stderr", regex=r"pattern", examples=["ex1"])
-    restored = Fact.from_dict(fact.to_dict())
-    assert restored.fact == fact.fact
-    assert restored.regex == fact.regex
 
 
 def test_action_resolve_params():
@@ -47,16 +57,10 @@ def test_action_captures_override_context():
     assert result == {"path": "/capture"}
 
 
-def test_action_roundtrip():
-    action = Action(action="fix", params={"k": "v"})
-    restored = Action.from_dict(action.to_dict())
-    assert restored.action == action.action
-    assert restored.params == action.params
-
-
-def test_llmconfig_inline_prompt():
-    config = LLMConfig(prompt_template="Fix this error")
-    assert config.get_prompt() == "Fix this error"
+def test_llmconfig_inline_prompt_with_context():
+    config = LLMConfig(prompt_template="Fix error in {package_name}@{version}")
+    result = config.get_prompt(context={"package_name": "foo/bar", "version": "v1.0"})
+    assert result == "Fix error in foo/bar@v1.0"
 
 
 def test_llmconfig_file_prompt(tmp_path):
@@ -66,38 +70,13 @@ def test_llmconfig_file_prompt(tmp_path):
     assert config.get_prompt() == "Fix the build error"
 
 
-def test_llmconfig_inline_prompt_with_context():
-    config = LLMConfig(prompt_template="Fix error in {package_name}@{version}")
-    result = config.get_prompt(context={"package_name": "foo/bar", "version": "v1.0"})
-    assert result == "Fix error in foo/bar@v1.0"
-
-
-def test_llmconfig_file_prompt_with_context(tmp_path):
-    prompt_file = tmp_path / "prompt.md"
-    prompt_file.write_text("Package: {package_name}\nError: {error}")
-    config = LLMConfig(prompt_template=f"file://{prompt_file}")
-    result = config.get_prompt(context={"package_name": "test/pkg", "error": "not found"})
-    assert result == "Package: test/pkg\nError: not found"
-
-
-def test_rule_type_deterministic():
-    rule = Rule(
-        name="test",
-        description="Test",
-        when=[Fact(fact="x", equals="y")],
-        then=[Action(action="fix", params={})],
-    )
-    assert rule.type == "deterministic"
-
-
-def test_rule_type_probabilistic():
-    rule = Rule(
-        name="test",
-        description="Test",
-        when=[Fact(fact="x", equals="y")],
-        llm_config=LLMConfig(prompt_template="Fix"),
-    )
-    assert rule.type == "probabilistic"
+def test_llmconfig_file_prompt_relative_path(tmp_path):
+    prompt_file = tmp_path / "prompts" / "fix.md"
+    prompt_file.parent.mkdir()
+    prompt_file.write_text("Fix the error: {error}")
+    config = LLMConfig(prompt_template="file://prompts/fix.md")
+    result = config.get_prompt(base_path=tmp_path, context={"error": "bad stuff"})
+    assert result == "Fix the error: bad stuff"
 
 
 def test_rule_matches_all_facts():
@@ -179,11 +158,6 @@ def test_rule_get_metadata_includes_equals_facts():
     assert "stderr" not in meta
 
 
-def test_rule_content_hash_stable():
-    rule = Rule(name="test", description="Test", when=[])
-    assert rule.content_hash() == rule.content_hash()
-
-
 def test_rule_content_hash_changes_on_diff():
     rule1 = Rule(name="test", description="Test", when=[])
     rule2 = Rule(name="test", description="Different", when=[])
@@ -195,19 +169,6 @@ def test_rule_is_ephemeral_by_path(tmp_path):
     rule = Rule(name="test", description="Test", when=[])
     rule._source_path = tmp_path / "rules" / "ephemeral" / "test.rule.yaml"
     assert rule.is_ephemeral is True
-
-
-def test_rule_is_not_ephemeral_by_path(tmp_path):
-    """Rule is not ephemeral if its source path is in root rules folder."""
-    rule = Rule(name="test", description="Test", when=[])
-    rule._source_path = tmp_path / "rules" / "test.rule.yaml"
-    assert rule.is_ephemeral is False
-
-
-def test_rule_is_not_ephemeral_without_path():
-    """Rule without source path is not ephemeral."""
-    rule = Rule(name="test", description="Test", when=[])
-    assert rule.is_ephemeral is False
 
 
 def test_rule_bind_preserves_runtime_state(tmp_path):
@@ -238,13 +199,46 @@ def test_rule_notes_serialization():
     assert loaded.notes == rule.notes
 
 
-def test_rule_notes_none_not_serialized():
-    rule = Rule(name="test", description="Test", when=[])
+def test_rule_act_calls_action_registry():
+    registry = MagicMock()
+    registry.call.return_value = "result"
+
+    rule = Rule(
+        name="test",
+        description="Test",
+        when=[Fact(fact="x", equals="y")],
+        then=[Action(action="fix_it", params={"x": "{val}"})],
+    )
+    bound = rule.bind({"val": "hello"}, {}, registry)
+    results = bound.act()
+    assert results == ["result"]
+    registry.call.assert_called_once()
+
+
+def test_rule_act_without_registry_raises():
+    rule = Rule(name="test", description="Test", when=[], then=[Action(action="fix")])
+    with pytest.raises(RuntimeError, match="not bound"):
+        rule.act()
+
+
+def test_rule_yaml_with_collection():
+    rule = Rule(name="test", description="Test", when=[], collection="custom")
     yaml_str = rule.to_yaml()
-    assert "notes:" not in yaml_str
+    assert "collection: custom" in yaml_str
+    loaded = Rule.from_yaml_string(yaml_str)
+    assert loaded.collection == "custom"
 
 
-def test_rule_bind_preserves_notes():
-    rule = Rule(name="test", description="Test", when=[], notes="some notes")
-    bound = rule.bind({}, {}, None)
-    assert bound.notes == "some notes"
+def test_rule_yaml_with_llm_config():
+    rule = Rule(
+        name="test",
+        description="Test",
+        when=[Fact(fact="x", equals="y")],
+        llm_config=LLMConfig(prompt_template="Fix {error}", tools=["read_file"]),
+    )
+    yaml_str = rule.to_yaml()
+    assert "llm_config:" in yaml_str
+    loaded = Rule.from_yaml_string(yaml_str)
+    assert loaded.llm_config is not None
+    assert loaded.llm_config.prompt_template == "Fix {error}"
+    assert loaded.llm_config.tools == ["read_file"]

@@ -232,8 +232,9 @@ class MarkDecorator:
             3. If recovery applied a rule, retry fn()
             4. If fn() succeeds after ephemeral rule, promote it
             5. If fn() fails after ephemeral rule, delete it and track rejection
-            6. Repeat until max_retries or no recovery possible
-            7. If exploration was attempted but failed, continue to next attempt
+            6. If action fails, mark rule as failed and try next candidate
+            7. Repeat until max_retries or no recovery possible
+            8. If exploration was attempted but failed, continue to next attempt
                (budget resets between attempts)
 
         Theow never blocks the consumer pipeline. If recovery fails or theow
@@ -242,6 +243,7 @@ class MarkDecorator:
         last_exception: Exception | None = None
         last_applied_rule: Rule | None = None
         rejected_attempts: list[dict[str, Any]] = []
+        failed_rules: list[str] = []
 
         for attempt in range(config.max_retries + 1):
             try:
@@ -271,12 +273,21 @@ class MarkDecorator:
                     config,
                     rejected_attempts,
                     attempt_number=attempt + 1,
+                    failed_rules=failed_rules,
                 )
+
+                if rule and not success:
+                    # Rule was found but action failed
+                    logger.info("Rule action failed, trying next", rule=rule.name)
+                    continue
+
                 if not success:
-                    # Only break if exploration wasn't attempted
-                    # If explored, continue to next attempt (budget resets)
+                    # No rule found
                     if not explored:
+                        # Exploration wasn't attempted, no more options
                         break
+                    # Explored but no rule created, continue to next attempt
+
                 last_applied_rule = rule
             except Exception as theow_err:
                 logger.error(f"{get_engine_name()} internal error", error=str(theow_err))
@@ -301,30 +312,40 @@ class MarkDecorator:
         config: MarkConfig,
         rejected_attempts: list[dict[str, Any]] | None = None,
         attempt_number: int = 1,
+        failed_rules: list[str] | None = None,
     ) -> tuple[bool, Rule | None, bool]:
         """Attempt recovery after fn() failure.
 
         Steps:
             1. Build context from exception using context_from
-            2. Try resolver to find matching rule
+            2. Try resolver to find matching rule (excluding already failed rules)
             3. If rule found, execute action and return
             4. If explorable, run LLM exploration to create new rule
             5. If rule created, execute action and return
 
         Returns:
             (success, rule, explored) where:
-            - success: indicates action executed
-            - rule: the applied rule (for ephemeral tracking)
+            - success: indicates action executed successfully
+            - rule: the applied rule (for tracking)
             - explored: True if exploration was attempted (even if no rule)
         """
         context = self._build_context(config.context_from, args, kwargs, exc)
         if context is None:
             return False, None, False
 
-        rule = self._try_resolve(context, config)
+        rule = self._try_resolve(context, config, exclude_rules=failed_rules)
         if rule:
             success = self._execute_rule(rule, context)
-            return success, rule if success else None, False
+            if success:
+                return True, rule, False
+            # Rule action failed - track it to avoid retrying
+            if failed_rules is not None:
+                failed_rules.append(rule.name)
+            if not self._should_explore(config):
+                # Exploration disabled: return so outer loop can try next rule
+                return False, rule, False
+            # Exploration enabled: fall through to explorer
+            logger.debug("Rule action failed, handing off to explorer", rule=rule.name)
 
         if self._should_explore(config):
             tracing = self._capture_tracing(exc)
@@ -333,7 +354,7 @@ class MarkDecorator:
             )
             if rule:
                 success = self._execute_rule(rule, context)
-                return success, rule if success else None, True
+                return success, rule, True
             return False, None, explored
 
         return False, None, False
@@ -358,13 +379,20 @@ class MarkDecorator:
             exception_message=str(exc),
         )
 
-    def _try_resolve(self, context: dict[str, Any], config: MarkConfig) -> Rule | None:
+    def _try_resolve(
+        self,
+        context: dict[str, Any],
+        config: MarkConfig,
+        exclude_rules: list[str] | None = None,
+    ) -> Rule | None:
         return self._resolver.resolve(
             context=context,
             collection=config.collection,
             rules=config.rules,
             tags=config.tags,
             fallback=config.fallback,
+            n_results=config.max_retries,
+            exclude_rules=exclude_rules,
         )
 
     def _should_explore(self, config: MarkConfig) -> bool:
