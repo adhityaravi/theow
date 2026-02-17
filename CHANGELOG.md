@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.4](https://github.com/adhityaravi/theow/compare/theow-v0.0.3...theow-v0.0.4) (2026-02-17)
+
+
+### Features
+
+* adds lifecycle hooks for decorator ([ed88335](https://github.com/adhityaravi/theow/commit/ed88335eeab3185ca5a30ce382777c3f2376dc35))
+
+
+### Bug Fixes
+
+* fix case specific prompts ([bdda658](https://github.com/adhityaravi/theow/commit/bdda658c01ca84754e7bd81eba629a7d9dad167c))
+* force capping on tokens and tool calls ([8c7b128](https://github.com/adhityaravi/theow/commit/8c7b128dc94ea7f5d9b4311e43e6521a46c58b29))
+
 ## [0.0.3](https://github.com/adhityaravi/theow/compare/theow-v0.0.2...theow-v0.0.3) (2026-02-16)
 
 
