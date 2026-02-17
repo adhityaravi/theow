@@ -111,7 +111,7 @@ Theow adds tracebacks automatically. The `context_from` callable builds the cont
 
 The `@mark` decorator accepts optional `setup` and `teardown` hooks that run around each recovery attempt. These let you prepare the environment before recovery and clean up or react after it, without coupling that logic into your rules or actions.
 
-Hooks do **not** run on the initial function call — only when recovery is triggered.
+Hooks do **not** run on the initial function call - only when recovery is triggered.
 
 ```python
 def my_setup(state: dict, attempt: int) -> dict | None:
@@ -119,7 +119,7 @@ def my_setup(state: dict, attempt: int) -> dict | None:
 
     Args:
         state: Dict pre-populated with the marked function's arguments.
-              Persists across attempts — use it to carry data between hooks.
+              Persists across attempts - use it to carry data between hooks.
         attempt: Current attempt number (1-indexed).
 
     Returns:
@@ -177,7 +177,7 @@ sequenceDiagram
     M-->>C: return result or re-raise
 ```
 
-**Hook state** is automatically pre-populated with the marked function's named arguments (via `inspect.signature`). In the example above, `state["workspace"]` is available without manual wiring. You can add your own keys — the dict persists across all attempts within a single recovery cycle.
+**Hook state** is automatically pre-populated with the marked function's named arguments (via `inspect.signature`). In the example above, `state["workspace"]` is available without manual wiring. You can add your own keys - the dict persists across all attempts within a single recovery cycle.
 
 **Use cases:**
 
@@ -188,8 +188,8 @@ sequenceDiagram
 
 **Behavior:**
 
-- `setup` raising an exception aborts recovery — the original exception is re-raised.
-- `teardown` errors are logged but never propagated — they cannot break recovery or the consumer pipeline.
+- `setup` raising an exception aborts recovery - the original exception is re-raised.
+- `teardown` errors are logged but never propagated - they cannot break recovery or the consumer pipeline.
 - If no hooks are provided, recovery works exactly as before. Hooks are fully optional.
 
 ### Rules
