@@ -31,7 +31,7 @@ class Theow:
 
     def __init__(
         self,
-        theow_dir: str = "./.theow",
+        theow_dir: str | Path = "./.theow",
         name: str = "Theow",
         llm: str | None = None,
         llm_secondary: str | None = None,
