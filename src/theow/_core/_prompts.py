@@ -119,7 +119,7 @@ def action_name(workspace: str, expected: str) -> dict:
 
 **Action guidelines:**
 - Keep actions succinct and readable. Compose long functions into smaller helpers.
-- Solve the problem generically. NEVER hardcode package names or versions.
+- Solve the problem generically. NEVER hardcode case-specific values.
 
 **Workflow:**
 1. `write_rule(name, content)` → returns path in result

@@ -173,7 +173,7 @@ class LLMGateway(ABC):
         return (
             f"NOTE: {budget_status}. Start wrapping up, but don't rush.\n\n"
             f"Quality matters more than speed. Write a GENERIC solution that works for "
-            f"similar errors, not just this specific case. Avoid hardcoding package names or paths.\n\n"
+            f"similar errors, not just this specific case. Avoid hardcoding case-specific values.\n\n"
             f"If you have a fix: request_templates() → write_rule/action → test_rule_match → submit_rule.\n\n"
             f"If you can't write a proper generic solution: use tags: [incomplete] and add notes. "
             f"The next attempt will continue from there."

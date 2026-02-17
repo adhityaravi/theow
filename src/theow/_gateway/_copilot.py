@@ -212,7 +212,7 @@ class CopilotGateway(LLMGateway):
                     "REMINDER - Follow guidelines from the initial prompt:\n"
                     "- Verify patterns against ACTUAL field values from the error context\n"
                     "- Least invasive fix - prefer config over code changes\n"
-                    "- NEVER hardcode package names, paths, or versions\n"
+                    "- NEVER hardcode case-specific values\n"
                     "- Write GENERIC solutions that handle all similar cases"
                 )
                 return ToolResult(textResultForLlm=templates + reminder)
