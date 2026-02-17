@@ -136,25 +136,42 @@ class LLMGateway(ABC):
         self,
         state: SessionState,
         max_calls: int,
+        max_tokens: int = 0,
     ) -> str | None:
         """Check if budget warning should be issued.
 
+        Warns at 80% of whichever session limit (tool calls or tokens) hits first.
         Returns warning message if at soft limit, None otherwise.
         Sets state.warned_about_budget to prevent duplicate warnings.
         """
         if state.warned_about_budget:
             return None
 
-        soft_limit = int(max_calls * SOFT_LIMIT_RATIO)
-        if state.tool_calls < soft_limit:
+        calls_at_limit = state.tool_calls >= int(max_calls * SOFT_LIMIT_RATIO)
+        tokens_at_limit = max_tokens > 0 and state.tokens_used >= int(max_tokens * SOFT_LIMIT_RATIO)
+
+        if not calls_at_limit and not tokens_at_limit:
             return None
 
-        remaining = max_calls - state.tool_calls
+        remaining_calls = max_calls - state.tool_calls
         state.warned_about_budget = True
-        logger.debug("Budget warning triggered", remaining=remaining, max_calls=max_calls)
+
+        parts = [f"{remaining_calls} tool calls remaining"]
+        if max_tokens > 0:
+            remaining_tokens = max_tokens - state.tokens_used
+            parts.append(f"~{remaining_tokens} tokens remaining")
+
+        budget_status = ", ".join(parts)
+        logger.debug(
+            "Budget warning triggered",
+            remaining_calls=remaining_calls,
+            tokens_used=state.tokens_used,
+            max_calls=max_calls,
+            max_tokens=max_tokens,
+        )
 
         return (
-            f"NOTE: {remaining} tool calls remaining. Start wrapping up, but don't rush.\n\n"
+            f"NOTE: {budget_status}. Start wrapping up, but don't rush.\n\n"
             f"Quality matters more than speed. Write a GENERIC solution that works for "
             f"similar errors, not just this specific case. Avoid hardcoding package names or paths.\n\n"
             f"If you have a fix: request_templates() → write_rule/action → test_rule_match → submit_rule.\n\n"
@@ -167,13 +184,13 @@ class LLMGateway(ABC):
         return {getattr(fn, "__name__", str(id(fn))): fn for fn in tools}
 
     def _extract_budget(self, budget: dict[str, Any]) -> tuple[int, int]:
-        """Extract budget params with defaults.
+        """Extract per-session budget params with defaults.
 
         Returns:
-            (max_tool_calls, max_tokens) tuple.
+            (max_tool_calls_per_session, max_tokens_per_session) tuple.
         """
-        max_calls = budget.get("max_tool_calls", 30)
-        max_tokens = budget.get("max_tokens", 8192)
+        max_calls = budget.get("max_tool_calls_per_session", 30)
+        max_tokens = budget.get("max_tokens_per_session", 8192)
         return max_calls, max_tokens
 
     def _execute_tool(

@@ -33,7 +33,7 @@ def test_anthropic_gateway_conversation_no_tool_use():
             result = gateway.conversation(
                 messages=[{"role": "user", "content": "test"}],
                 tools=[],
-                budget={"max_tool_calls": 5},
+                budget={"max_tool_calls_per_session": 5},
             )
 
             assert result.tokens_used == 15
@@ -78,7 +78,7 @@ def test_anthropic_conversation_with_tool_use():
             result = gateway.conversation(
                 messages=messages,
                 tools=[read_file],
-                budget={"max_tool_calls": 10},
+                budget={"max_tool_calls_per_session": 10},
             )
 
             assert result.tool_calls == 1
@@ -113,7 +113,7 @@ def test_anthropic_conversation_signal_during_tool():
                 gateway.conversation(
                     messages=[{"role": "user", "content": "test"}],
                     tools=[give_up],
-                    budget={"max_tool_calls": 10},
+                    budget={"max_tool_calls_per_session": 10},
                 )
 
 
@@ -153,7 +153,7 @@ def test_anthropic_conversation_budget_warning():
             gateway.conversation(
                 messages=messages,
                 tools=[noop],
-                budget={"max_tool_calls": 5},
+                budget={"max_tool_calls_per_session": 5},
             )
 
             user_messages = [m for m in messages if m.get("role") == "user"]

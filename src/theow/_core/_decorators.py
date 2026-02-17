@@ -470,8 +470,8 @@ class MarkDecorator:
                 logger.warning("Tool not found", tool=tool_name)
 
         budget = {
-            "max_tool_calls": rule.llm_config.constraints.get("max_tool_calls", 10),
-            "max_tokens": rule.llm_config.constraints.get("max_tokens", 4096),
+            "max_tool_calls_per_session": rule.llm_config.constraints.get("max_tool_calls", 10),
+            "max_tokens_per_session": rule.llm_config.constraints.get("max_tokens", 4096),
         }
 
         logger.debug("Executing LLM action", rule=rule.name)

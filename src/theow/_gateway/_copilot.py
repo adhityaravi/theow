@@ -21,8 +21,8 @@ from copilot.types import ToolInvocation, ToolResult
 
 from theow._core._logging import get_engine_name, get_logger
 from theow._core._prompts import TEMPLATES
-from theow._core._tools import ExplorationSignal, RequestTemplates
-from theow._gateway._base import ConversationResult, LLMGateway, SessionState
+from theow._core._tools import ExplorationSignal, GiveUp, RequestTemplates
+from theow._gateway._base import ConversationResult, LLMGateway, SessionState, build_tool_declaration
 
 logger = get_logger(__name__)
 
@@ -62,7 +62,7 @@ class CopilotGateway(LLMGateway):
         budget: dict[str, Any],
     ) -> ConversationResult:
         """Run conversation with tool use until signal or budget exhausted."""
-        self._max_calls, _ = self._extract_budget(budget)
+        self._max_calls, self._max_tokens = self._extract_budget(budget)
         self._tool_map = self._build_tool_map(tools)
         self._state = SessionState()
         self._signal = None
@@ -130,7 +130,7 @@ class CopilotGateway(LLMGateway):
         copilot_tools = []
 
         for name, fn in self._tool_map.items():
-            doc = fn.__doc__ or ""
+            decl = build_tool_declaration(name, fn, schema_key="parameters")
 
             def make_handler(tool_fn: Callable[..., Any]) -> Callable[[ToolInvocation], ToolResult]:
                 def handler(invocation: ToolInvocation) -> ToolResult:
@@ -141,8 +141,9 @@ class CopilotGateway(LLMGateway):
             copilot_tools.append(
                 Tool(
                     name=name,
-                    description=doc,
+                    description=decl["description"],
                     handler=make_handler(fn),
+                    parameters=decl["parameters"],
                 )
             )
 
@@ -159,17 +160,43 @@ class CopilotGateway(LLMGateway):
 
         logger.debug(f"{get_engine_name()} <-- LLM", tools=[tool_name])
 
-        # SDK controls agentic loop, so we enforce budget here
-        if self._state and self._state.tool_calls > self._max_calls:
+        # Hard kill: if LLM ignores the 80% warning and exceeds 100%, abort the SDK loop.
+        # session.abort() is async but the event loop is already running (we're inside
+        # send_and_wait), so schedule it via ensure_future. It fires after this handler
+        # returns, stopping the loop. conversation() then raises the stored signal.
+        if self._state and (
+            self._state.tool_calls > self._max_calls
+            or (self._max_tokens > 0 and self._state.tokens_used > self._max_tokens)
+        ):
+            logger.warning(
+                "Budget exceeded, aborting SDK loop",
+                tool_calls=self._state.tool_calls,
+                tokens_used=self._state.tokens_used,
+            )
+            self._signal = GiveUp("Session budget exceeded")
+            if self._session:
+                asyncio.ensure_future(self._session.abort())
             return ToolResult(
-                textResultForLlm="BUDGET EXCEEDED. Stop and submit your rule now with submit_rule().",
+                textResultForLlm="Session budget exceeded",
                 resultType="failure",
             )
-        warning = self.check_budget_warning(self._state, self._max_calls) if self._state else None
+
+        warning = (
+            self.check_budget_warning(self._state, self._max_calls, self._max_tokens)
+            if self._state
+            else None
+        )
+
+        # Estimate input tokens from args
+        if self._state:
+            self._state.tokens_used += len(json.dumps(args)) // 4
 
         try:
             result = fn(**args)
             text_result = json.dumps(result) if not isinstance(result, str) else result
+            # Estimate output tokens from result
+            if self._state:
+                self._state.tokens_used += len(text_result) // 4
             if warning:
                 text_result = f"{text_result}\n\n{warning}"
             return ToolResult(textResultForLlm=text_result)

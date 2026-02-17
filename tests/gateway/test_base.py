@@ -68,6 +68,15 @@ def test_check_budget_warning_only_once():
     assert second is None
 
 
+def test_check_budget_warning_token_limit():
+    gw = _TestGateway()
+    state = SessionState(tool_calls=5, tokens_used=6800)
+    result = gw.check_budget_warning(state, max_calls=30, max_tokens=8192)
+    assert result is not None
+    assert "tokens remaining" in result
+    assert state.warned_about_budget is True
+
+
 def test_execute_tool_success():
     gw = _TestGateway()
     tool_map = {"greet": lambda name: f"Hello {name}"}

@@ -36,8 +36,8 @@ class Theow:
         llm: str | None = None,
         llm_secondary: str | None = None,
         session_limit: int = 20,
-        max_tool_calls: int = 30,
-        max_tokens: int = 8192,
+        max_tool_calls_per_session: int = 30,
+        max_tokens_per_session: int = 8192,
     ) -> None:
         self._name = name
         set_engine_name(name)
@@ -46,8 +46,8 @@ class Theow:
         self._llm = llm
         self._llm_secondary = llm_secondary
         self._session_limit = session_limit
-        self._max_tool_calls = max_tool_calls
-        self._max_tokens = max_tokens
+        self._max_tool_calls_per_session = max_tool_calls_per_session
+        self._max_tokens_per_session = max_tokens_per_session
 
         self._gateway: LLMGateway | None = None
         self._secondary_gateway: LLMGateway | None = None
@@ -84,8 +84,8 @@ class Theow:
             action_registry=self._action_registry,
             rules_dir=self._theow_dir / "rules",
             session_limit=self._session_limit,
-            max_tool_calls=self._max_tool_calls,
-            max_tokens=self._max_tokens,
+            max_tool_calls_per_session=self._max_tool_calls_per_session,
+            max_tokens_per_session=self._max_tokens_per_session,
         )
 
         self._mark_decorator = MarkDecorator(

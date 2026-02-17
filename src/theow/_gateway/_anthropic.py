@@ -24,6 +24,10 @@ from theow._gateway._base import (
 
 logger = get_logger(__name__)
 
+# NOTE: Per-response output cap for the Anthropic API. Not a session budget param.
+# 8192 gives enough room for rule YAML + action code + reasoning in a single response.
+_PER_RESPONSE_TOKENS = 8192
+
 
 class AnthropicGateway(LLMGateway):
     """Anthropic implementation using anthropic SDK."""
@@ -53,7 +57,7 @@ class AnthropicGateway(LLMGateway):
         state = SessionState()
 
         while state.tool_calls < max_calls:
-            response = self._call_model(messages, declarations, max_tokens, state)
+            response = self._call_model(messages, declarations, state)
             if response is None:
                 break
 
@@ -65,7 +69,7 @@ class AnthropicGateway(LLMGateway):
             self._execute_tool_calls(tool_calls, tool_map, messages, state)
 
             # Check for budget warning after tool execution
-            warning = self.check_budget_warning(state, max_calls)
+            warning = self.check_budget_warning(state, max_calls, max_tokens)
             if warning:
                 messages.append({"role": "user", "content": warning})
 
@@ -79,7 +83,6 @@ class AnthropicGateway(LLMGateway):
         self,
         messages: list[dict[str, Any]],
         declarations: list[dict[str, Any]],
-        max_tokens: int,
         state: SessionState,
     ) -> anthropic.types.Message | None:
         """Send conversation to Claude, update token count."""
@@ -92,7 +95,7 @@ class AnthropicGateway(LLMGateway):
         try:
             response = self._client.messages.create(
                 model=self._model,
-                max_tokens=max_tokens,
+                max_tokens=_PER_RESPONSE_TOKENS,
                 messages=messages,  # type: ignore[arg-type]
                 tools=declarations,  # type: ignore[arg-type]
             )

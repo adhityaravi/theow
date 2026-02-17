@@ -50,7 +50,7 @@ class GeminiGateway(LLMGateway):
         Messages list is modified in-place.
         Raises ExplorationSignal subclasses when LLM calls signal tools.
         """
-        max_calls, _ = self._extract_budget(budget)
+        max_calls, max_tokens = self._extract_budget(budget)
         tool_map = self._build_tool_map(tools)
 
         # Build config
@@ -97,7 +97,7 @@ class GeminiGateway(LLMGateway):
             self._history.append(tool_content)
 
             # Check for budget warning after tool execution
-            warning = self.check_budget_warning(state, max_calls)
+            warning = self.check_budget_warning(state, max_calls, max_tokens)
             if warning:
                 self._history.append(
                     types.Content(role="user", parts=[types.Part.from_text(text=warning)])

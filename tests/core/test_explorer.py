@@ -386,7 +386,7 @@ def test_validate_rule_with_action_file(theow_dir):
 
 def test_run_direct_no_gateway():
     explorer = _make_explorer(gateway=None)
-    result = explorer.run_direct("fix this", [], {"max_tool_calls": 5})
+    result = explorer.run_direct("fix this", [], {"max_tool_calls_per_session": 5})
     assert result is False
 
 
@@ -394,7 +394,7 @@ def test_run_direct_done():
     gateway = MagicMock()
     gateway.conversation.side_effect = Done("fixed")
     explorer = _make_explorer(gateway=gateway)
-    result = explorer.run_direct("fix this", [], {"max_tool_calls": 5})
+    result = explorer.run_direct("fix this", [], {"max_tool_calls_per_session": 5})
     assert result is True
 
 
@@ -402,7 +402,7 @@ def test_run_direct_give_up():
     gateway = MagicMock()
     gateway.conversation.side_effect = GiveUp("nope")
     explorer = _make_explorer(gateway=gateway)
-    result = explorer.run_direct("fix this", [], {"max_tool_calls": 5})
+    result = explorer.run_direct("fix this", [], {"max_tool_calls_per_session": 5})
     assert result is False
 
 
@@ -410,7 +410,7 @@ def test_run_direct_budget_exhausted():
     gateway = MagicMock()
     gateway.conversation.return_value = MagicMock()
     explorer = _make_explorer(gateway=gateway)
-    result = explorer.run_direct("fix this", [], {"max_tool_calls": 5})
+    result = explorer.run_direct("fix this", [], {"max_tool_calls_per_session": 5})
     assert result is False
 
 
@@ -418,7 +418,7 @@ def test_run_direct_unknown_signal():
     gateway = MagicMock()
     gateway.conversation.side_effect = RequestTemplates()
     explorer = _make_explorer(gateway=gateway)
-    result = explorer.run_direct("fix this", [], {"max_tool_calls": 5})
+    result = explorer.run_direct("fix this", [], {"max_tool_calls_per_session": 5})
     assert result is False
 
 

@@ -32,7 +32,7 @@ def test_gemini_gateway_conversation_no_candidates():
             result = gateway.conversation(
                 messages=[{"role": "user", "content": "test"}],
                 tools=[],
-                budget={"max_tool_calls": 5},
+                budget={"max_tool_calls_per_session": 5},
             )
 
             assert result.tool_calls == 0
@@ -105,7 +105,7 @@ def test_gemini_conversation_with_function_call():
             result = gateway.conversation(
                 messages=messages,
                 tools=[greet],
-                budget={"max_tool_calls": 10},
+                budget={"max_tool_calls_per_session": 10},
             )
 
             assert result.tool_calls == 1
@@ -145,7 +145,7 @@ def test_gemini_conversation_signal():
                 gateway.conversation(
                     messages=[{"role": "user", "content": "test"}],
                     tools=[give_up],
-                    budget={"max_tool_calls": 10},
+                    budget={"max_tool_calls_per_session": 10},
                 )
 
 
@@ -228,6 +228,6 @@ def test_gemini_conversation_no_user_content():
             result = gateway.conversation(
                 messages=[{"role": "assistant", "content": "test"}],
                 tools=[],
-                budget={"max_tool_calls": 5},
+                budget={"max_tool_calls_per_session": 5},
             )
             assert result.tool_calls == 0

@@ -68,8 +68,8 @@ pipeline_agent = Theow(
     llm="gemini/gemini-2.0-flash",                    # primary LLM (provider/model)
     llm_secondary="anthropic/claude-sonnet-4-20250514", # fallback LLM
     session_limit=20,                                 # max explorations per session
-    max_tool_calls=30,                                # max tool calls per conversation
-    max_tokens=8192,                                  # max output tokens
+    max_tool_calls_per_session=30,                    # max tool calls per session
+    max_tokens_per_session=8192,                      # max tokens per session
 )
 ```
 

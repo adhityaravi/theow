@@ -47,16 +47,16 @@ class Explorer:
         action_registry: ActionRegistry,
         rules_dir: Path,
         session_limit: int = 20,
-        max_tool_calls: int = 30,
-        max_tokens: int = 8192,
+        max_tool_calls_per_session: int = 30,
+        max_tokens_per_session: int = 8192,
     ) -> None:
         self._chroma = chroma
         self._gateway = gateway
         self._action_registry = action_registry
         self._rules_dir = rules_dir
         self._session_limit = session_limit
-        self._max_tool_calls = max_tool_calls
-        self._max_tokens = max_tokens
+        self._max_tool_calls_per_session = max_tool_calls_per_session
+        self._max_tokens_per_session = max_tokens_per_session
         self._session_count = 0
         self._session_cache: SessionCache | None = None
         self._pending_cleanup: list[Path] = []  # Files to clean up after all retries
@@ -200,7 +200,10 @@ class Explorer:
         """Run conversation until signal or budget exhausted."""
         assert self._gateway is not None
         if budget is None:
-            budget = {"max_tool_calls": self._max_tool_calls, "max_tokens": self._max_tokens}
+            budget = {
+                "max_tool_calls_per_session": self._max_tool_calls_per_session,
+                "max_tokens_per_session": self._max_tokens_per_session,
+            }
         try:
             self._gateway.conversation(
                 messages=messages,

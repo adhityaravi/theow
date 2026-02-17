@@ -42,6 +42,7 @@ def test_copilot_handle_tool_call_success():
         gateway = CopilotGateway()
         gateway._state = SessionState()
         gateway._max_calls = 30
+        gateway._max_tokens = 0
 
         def greet(name: str) -> str:
             return f"Hello {name}"
@@ -60,10 +61,41 @@ def test_copilot_handle_tool_call_budget_exceeded():
         gateway = CopilotGateway()
         gateway._state = SessionState(tool_calls=31)
         gateway._max_calls = 30
+        gateway._max_tokens = 0
 
         invocation = {"arguments": {}, "tool_name": "noop"}
         result = gateway._handle_tool_call(lambda: "ok", invocation)
-        assert "BUDGET EXCEEDED" in result["textResultForLlm"]
+        assert "Session budget exceeded" in result["textResultForLlm"]
+
+
+def test_copilot_handle_tool_call_token_budget_exceeded():
+    with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
+        from theow._gateway._copilot import CopilotGateway
+        from theow._gateway._base import SessionState
+
+        gateway = CopilotGateway()
+        gateway._state = SessionState(tool_calls=1, tokens_used=9000)
+        gateway._max_calls = 30
+        gateway._max_tokens = 8192
+
+        invocation = {"arguments": {}, "tool_name": "noop"}
+        result = gateway._handle_tool_call(lambda: "ok", invocation)
+        assert "Session budget exceeded" in result["textResultForLlm"]
+
+
+def test_copilot_handle_tool_call_estimates_tokens():
+    with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
+        from theow._gateway._copilot import CopilotGateway
+        from theow._gateway._base import SessionState
+
+        gateway = CopilotGateway()
+        gateway._state = SessionState()
+        gateway._max_calls = 30
+        gateway._max_tokens = 100000
+
+        invocation = {"arguments": {"data": "x" * 400}, "tool_name": "echo"}
+        gateway._handle_tool_call(lambda data: data, invocation)
+        assert gateway._state.tokens_used > 0
 
 
 def test_copilot_handle_tool_call_request_templates_with_config(tmp_path):
@@ -74,6 +106,7 @@ def test_copilot_handle_tool_call_request_templates_with_config(tmp_path):
         gateway = CopilotGateway()
         gateway._state = SessionState()
         gateway._max_calls = 30
+        gateway._max_tokens = 0
         gateway._gateway_config = {"rules_dir": tmp_path / "rules"}
         (tmp_path / "actions").mkdir()
 
@@ -94,6 +127,7 @@ def test_copilot_handle_tool_call_request_templates_no_config():
         gateway = CopilotGateway()
         gateway._state = SessionState()
         gateway._max_calls = 30
+        gateway._max_tokens = 0
         gateway._gateway_config = {}
 
         def request_templates():
@@ -112,6 +146,7 @@ def test_copilot_handle_tool_call_other_signal():
         gateway = CopilotGateway()
         gateway._state = SessionState()
         gateway._max_calls = 30
+        gateway._max_tokens = 0
 
         def give_up(reason: str) -> None:
             raise GiveUp(reason)
@@ -130,6 +165,7 @@ def test_copilot_handle_tool_call_exception():
         gateway = CopilotGateway()
         gateway._state = SessionState()
         gateway._max_calls = 30
+        gateway._max_tokens = 0
 
         def bad_tool():
             raise ValueError("boom")
@@ -148,6 +184,7 @@ def test_copilot_handle_tool_call_budget_warning():
         gateway = CopilotGateway()
         gateway._state = SessionState(tool_calls=23)
         gateway._max_calls = 30
+        gateway._max_tokens = 0
 
         invocation = {"arguments": {}, "tool_name": "noop"}
         result = gateway._handle_tool_call(lambda: "ok", invocation)
