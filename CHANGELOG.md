@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.5](https://github.com/adhityaravi/theow/compare/theow-v0.0.4...theow-v0.0.5) (2026-02-17)
+
+
+### Bug Fixes
+
+* type hint issues ([63f4cfd](https://github.com/adhityaravi/theow/commit/63f4cfdcf8421d54280f7da0103e3fa5057d90e0))
+
 ## [0.0.4](https://github.com/adhityaravi/theow/compare/theow-v0.0.3...theow-v0.0.4) (2026-02-17)
 
 
