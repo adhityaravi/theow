@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.6](https://github.com/adhityaravi/theow/compare/theow-v0.0.5...theow-v0.0.6) (2026-02-17)
+
+
+### Bug Fixes
+
+* adds py.typed ([a49ec78](https://github.com/adhityaravi/theow/commit/a49ec789b75dfa133e5f6cca29b5703d09466a9f))
+
 ## [0.0.5](https://github.com/adhityaravi/theow/compare/theow-v0.0.4...theow-v0.0.5) (2026-02-17)
 
 
