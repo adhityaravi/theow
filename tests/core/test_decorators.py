@@ -550,3 +550,148 @@ def test_reject_rule():
     assert "didn't work" in rejection["error"]
     assert rejection["_files"] == [Path("/tmp/bad.yaml")]
     explorer._session_cache.invalidate.assert_called_with("bad")
+
+
+def test_recovery_hooks_lifecycle():
+    """Hooks wrap recovery attempts, not the initial fn() call."""
+    action_registry = ActionRegistry()
+
+    @action_registry.register("fix")
+    def fix():
+        return True
+
+    rule = Rule(
+        name="r",
+        description="R",
+        when=[Fact(fact="x", equals="y")],
+        then=[Action(action="fix")],
+    )
+    bound = rule.bind({}, {}, action_registry)
+
+    resolver = MagicMock()
+    resolver.resolve.return_value = bound
+    explorer = MagicMock()
+    explorer.cleanup.return_value = None
+    md = _make_mark_decorator(resolver=resolver, explorer=explorer)
+
+    log = []
+
+    def my_setup(state, attempt):
+        log.append(f"setup:{attempt}:ws={state.get('workspace')}")
+        return state
+
+    def my_teardown(state, attempt, success):
+        log.append(f"teardown:{attempt}:{success}")
+
+    config = MarkConfig(
+        context_from=lambda *a, **k: {"x": "y"},
+        max_retries=2,
+        rules=None,
+        tags=None,
+        fallback=True,
+        explorable=False,
+        collection="default",
+        setup=my_setup,
+        teardown=my_teardown,
+    )
+
+    call_count = 0
+
+    def fn(workspace):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise ValueError("fails")
+        return "ok"
+
+    result = md._run_with_recovery(fn, ("/tmp/ws",), {}, config)
+    assert result == "ok"
+    # Initial fn() has no hooks. Recovery attempt 1: setup -> recovery -> verify -> teardown
+    assert log == [
+        "setup:1:ws=/tmp/ws",
+        "teardown:1:True",
+    ]
+
+
+def test_setup_failure_aborts_recovery():
+    """If setup fails, no more recovery attempts are made."""
+    resolver = MagicMock()
+    explorer = MagicMock()
+    explorer.cleanup.return_value = None
+    md = _make_mark_decorator(resolver=resolver, explorer=explorer)
+
+    def bad_setup(state, attempt):
+        raise RuntimeError("sandbox failed")
+
+    config = MarkConfig(
+        context_from=lambda *a, **k: {},
+        max_retries=3,
+        rules=None,
+        tags=None,
+        fallback=True,
+        explorable=False,
+        collection="default",
+        setup=bad_setup,
+    )
+
+    call_count = 0
+
+    def fn():
+        nonlocal call_count
+        call_count += 1
+        raise ValueError("fail")
+
+    with pytest.raises(ValueError, match="fail"):
+        md._run_with_recovery(fn, (), {}, config)
+
+    # Only the initial attempt, setup fails on first recovery attempt so no retry
+    assert call_count == 1
+
+
+def test_teardown_failure_does_not_propagate():
+    """Teardown errors are swallowed, fn() result is returned."""
+    action_registry = ActionRegistry()
+
+    @action_registry.register("fix")
+    def fix():
+        return True
+
+    rule = Rule(
+        name="r",
+        description="R",
+        when=[Fact(fact="x", equals="y")],
+        then=[Action(action="fix")],
+    )
+    bound = rule.bind({}, {}, action_registry)
+
+    resolver = MagicMock()
+    resolver.resolve.return_value = bound
+    explorer = MagicMock()
+    explorer.cleanup.return_value = None
+    md = _make_mark_decorator(resolver=resolver, explorer=explorer)
+
+    def bad_teardown(state, attempt, success):
+        raise RuntimeError("teardown exploded")
+
+    config = MarkConfig(
+        context_from=lambda *a, **k: {"x": "y"},
+        max_retries=1,
+        rules=None,
+        tags=None,
+        fallback=True,
+        explorable=False,
+        collection="default",
+        teardown=bad_teardown,
+    )
+
+    call_count = 0
+
+    def fn():
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise ValueError("fails")
+        return "ok"
+
+    result = md._run_with_recovery(fn, (), {}, config)
+    assert result == "ok"

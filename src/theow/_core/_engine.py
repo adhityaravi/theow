@@ -123,6 +123,8 @@ class Theow:
         fallback: bool = True,
         explorable: bool = False,
         collection: str = "default",
+        setup: Callable[[dict[str, Any], int], dict[str, Any] | None] | None = None,
+        teardown: Callable[[dict[str, Any], int, bool], None] | None = None,
     ) -> Callable[[Callable[P, R]], Callable[P, R]]:
         """Mark a function as Theow-managed with automatic recovery."""
         return self._mark_decorator(
@@ -133,6 +135,8 @@ class Theow:
             fallback=fallback,
             explorable=explorable,
             collection=collection,
+            setup=setup,
+            teardown=teardown,
         )
 
     def resolve(

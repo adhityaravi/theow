@@ -22,7 +22,12 @@ from copilot.types import ToolInvocation, ToolResult
 from theow._core._logging import get_engine_name, get_logger
 from theow._core._prompts import TEMPLATES
 from theow._core._tools import ExplorationSignal, GiveUp, RequestTemplates
-from theow._gateway._base import ConversationResult, LLMGateway, SessionState, build_tool_declaration
+from theow._gateway._base import (
+    ConversationResult,
+    LLMGateway,
+    SessionState,
+    build_tool_declaration,
+)
 
 logger = get_logger(__name__)
 

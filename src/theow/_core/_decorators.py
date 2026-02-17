@@ -7,7 +7,7 @@ import functools
 import inspect
 import os
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, ParamSpec, TypeVar
 
@@ -173,6 +173,23 @@ class MarkConfig:
     fallback: bool
     explorable: bool
     collection: str
+    setup: Callable[[dict[str, Any], int], dict[str, Any] | None] | None = None
+    teardown: Callable[[dict[str, Any], int, bool], None] | None = None
+
+
+@dataclass
+class _RecoveryState:
+    """Mutable state shared across recovery attempts."""
+
+    last_exception: Exception | None = None
+    last_applied_rule: Rule | None = None
+    rejected_attempts: list[dict[str, Any]] = field(default_factory=list)
+    failed_rules: list[str] = field(default_factory=list)
+    hook_state: dict[str, Any] = field(default_factory=dict)
+    done: bool = False
+
+
+_UNRESOLVED = object()
 
 
 class MarkDecorator:
@@ -197,6 +214,8 @@ class MarkDecorator:
         fallback: bool = True,
         explorable: bool = False,
         collection: str = "default",
+        setup: Callable[[dict[str, Any], int], dict[str, Any] | None] | None = None,
+        teardown: Callable[[dict[str, Any], int, bool], None] | None = None,
     ) -> Callable[[Callable[P, R]], Callable[P, R]]:
         config = MarkConfig(
             context_from=context_from,
@@ -206,6 +225,8 @@ class MarkDecorator:
             fallback=fallback,
             explorable=explorable,
             collection=collection,
+            setup=setup,
+            teardown=teardown,
         )
 
         def decorator(fn: Callable[P, R]) -> Callable[P, R]:
@@ -227,81 +248,162 @@ class MarkDecorator:
         """Run function with theow recovery.
 
         Steps:
-            1. Try fn(), return if succeeds
-            2. On failure, attempt recovery (find/create rule, run action)
-            3. If recovery applied a rule, retry fn()
-            4. If fn() succeeds after ephemeral rule, promote it
-            5. If fn() fails after ephemeral rule, delete it and track rejection
-            6. If action fails, mark rule as failed and try next candidate
-            7. Repeat until max_retries or no recovery possible
-            8. If exploration was attempted but failed, continue to next attempt
-               (budget resets between attempts)
+            1. Try fn(), return if succeeds (no hooks on initial attempt)
+            2. For each retry:
+               a. _call_setup - lifecycle hook before recovery
+               b. _run_recovery - find rule, execute action
+               c. _run_verify - retry fn() to check if fix worked
+               d. _call_teardown - lifecycle hook after recovery
+            3. _cleanup_recovery - clean up ephemeral files, re-raise
 
         Theow never blocks the consumer pipeline. If recovery fails or theow
         itself errors, the original exception is re-raised.
         """
-        last_exception: Exception | None = None
-        last_applied_rule: Rule | None = None
-        rejected_attempts: list[dict[str, Any]] = []
-        failed_rules: list[str] = []
+        state = _RecoveryState(
+            hook_state=(
+                self._build_hook_state(fn, args, kwargs)
+                if (config.setup or config.teardown)
+                else {}
+            ),
+        )
 
-        for attempt in range(config.max_retries + 1):
-            try:
-                result = fn(*args, **kwargs)
-                if last_applied_rule and last_applied_rule.is_ephemeral:
-                    self._promote_rule(last_applied_rule)
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            state.last_exception = exc
+            logger.info("Failure captured", attempt=1, error=str(exc))
 
-                return result
+        try:
+            for attempt_num in range(1, config.max_retries + 1):
+                if not self._call_setup(config, state, attempt_num):
+                    break
 
-            except Exception as exc:
-                last_exception = exc
-                logger.info("Failure captured", attempt=attempt + 1, error=str(exc))
-                if last_applied_rule and last_applied_rule.is_ephemeral:
-                    rejected_attempts.append(self._reject_rule(last_applied_rule, exc))
-                    last_applied_rule = None
-
-            if attempt >= config.max_retries:
-                break
-
-            # Theow recovery is best-effort. Internal errors are logged, not propagated.
-            try:
-                success, rule, explored = self._attempt_recovery(
-                    fn,
-                    args,
-                    kwargs,
-                    last_exception,
-                    config,
-                    rejected_attempts,
-                    attempt_number=attempt + 1,
-                    failed_rules=failed_rules,
-                )
-
-                if rule and not success:
-                    # Rule was found but action failed
-                    logger.info("Rule action failed, trying next", rule=rule.name)
+                if not self._run_recovery(fn, args, kwargs, config, state, attempt_num):
+                    if state.done:
+                        break
                     continue
 
-                if not success:
-                    # No rule found
-                    if not explored:
-                        # Exploration wasn't attempted, no more options
-                        break
-                    # Explored but no rule created, continue to next attempt
+                result = self._run_verify(fn, args, kwargs, config, state, attempt_num)
+                if result is not _UNRESOLVED:
+                    return result  # type: ignore[return-value]
+        except Exception as internal_err:
+            logger.error(f"{get_engine_name()} internal error", error=str(internal_err))
 
-                last_applied_rule = rule
-            except Exception as theow_err:
-                logger.error(f"{get_engine_name()} internal error", error=str(theow_err))
-                break
+        self._cleanup_recovery(state)
+        raise state.last_exception
 
-        # Clean up ephemeral files after all retries exhausted
+    def _call_setup(
+        self,
+        config: MarkConfig,
+        state: _RecoveryState,
+        attempt: int,
+    ) -> bool:
+        """Run setup hook. Returns False if setup failed (aborts recovery)."""
+        if not config.setup:
+            return True
         try:
-            self._explorer.cleanup(rejected_attempts)
+            logger.debug("Running setup hook", attempt=attempt)
+            state.hook_state = config.setup(state.hook_state, attempt) or state.hook_state
+            return True
+        except Exception as hook_err:
+            logger.error(
+                "Setup hook failed, aborting recovery",
+                attempt=attempt,
+                error=str(hook_err),
+            )
+            return False
+
+    def _call_teardown(
+        self,
+        config: MarkConfig,
+        state: _RecoveryState,
+        attempt: int,
+        success: bool,
+    ) -> None:
+        """Run teardown hook. Errors are logged, never propagated."""
+        if not config.teardown:
+            return
+        try:
+            logger.debug("Running teardown hook", attempt=attempt, success=success)
+            config.teardown(state.hook_state, attempt, success)
+        except Exception as hook_err:
+            logger.warning("Teardown hook failed", error=str(hook_err))
+
+    def _run_recovery(
+        self,
+        fn: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        config: MarkConfig,
+        state: _RecoveryState,
+        attempt_num: int,
+    ) -> bool:
+        """Find rule and execute action. Returns True if recovery applied.
+
+        On failure, calls teardown and sets state.done if no more options.
+        """
+        try:
+            success, rule, explored = self._attempt_recovery(
+                fn,
+                args,
+                kwargs,
+                state.last_exception,  # type: ignore[arg-type]
+                config,
+                state.rejected_attempts,
+                attempt_number=attempt_num,
+                failed_rules=state.failed_rules,
+            )
+
+            if rule and not success:
+                logger.info("Rule action failed, trying next", rule=rule.name)
+                self._call_teardown(config, state, attempt_num, False)
+                return False
+
+            if not success:
+                self._call_teardown(config, state, attempt_num, False)
+                if not explored:
+                    state.done = True
+                return False
+
+            state.last_applied_rule = rule
+            return True
+        except Exception as theow_err:
+            logger.error(f"{get_engine_name()} internal error", error=str(theow_err))
+            self._call_teardown(config, state, attempt_num, False)
+            state.done = True
+            return False
+
+    def _run_verify(
+        self,
+        fn: Callable[P, R],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        config: MarkConfig,
+        state: _RecoveryState,
+        attempt_num: int,
+    ) -> R | object:
+        """Retry fn() to verify recovery worked. Returns result or _UNRESOLVED."""
+        try:
+            result = fn(*args, **kwargs)
+            self._call_teardown(config, state, attempt_num, True)
+            if state.last_applied_rule and state.last_applied_rule.is_ephemeral:
+                self._promote_rule(state.last_applied_rule)
+            return result
+        except Exception as exc:
+            self._call_teardown(config, state, attempt_num, False)
+            state.last_exception = exc
+            logger.info("Failure captured", attempt=attempt_num + 1, error=str(exc))
+            if state.last_applied_rule and state.last_applied_rule.is_ephemeral:
+                state.rejected_attempts.append(self._reject_rule(state.last_applied_rule, exc))
+                state.last_applied_rule = None
+            return _UNRESOLVED
+
+    def _cleanup_recovery(self, state: _RecoveryState) -> None:
+        """Clean up ephemeral files after recovery exhausted."""
+        try:
+            self._explorer.cleanup(state.rejected_attempts)
         except Exception as cleanup_err:
             logger.error("Cleanup failed", error=str(cleanup_err))
-
-        if last_exception:
-            raise last_exception
-        raise RuntimeError("Unexpected state: no exception captured")
 
     def _attempt_recovery(
         self,
@@ -358,6 +460,18 @@ class MarkDecorator:
             return False, None, explored
 
         return False, None, False
+
+    def _build_hook_state(
+        self,
+        fn: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Pre-populate hook state with the function's named arguments."""
+        sig = inspect.signature(fn)
+        state = dict(zip(sig.parameters.keys(), args))
+        state.update(kwargs)
+        return state
 
     def _build_context(
         self,
