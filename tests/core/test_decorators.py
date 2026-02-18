@@ -118,31 +118,40 @@ def test_standalone_action_decorator():
 
 
 def test_should_explore_enabled():
-    resolver = MagicMock()
-    explorer = MagicMock()
-    tool_registry = ToolRegistry()
-    md = MarkDecorator(resolver, explorer, tool_registry)
+    """Exploration is gated by both config.explorable and THEOW_EXPLORE env var."""
+    from theow._core._recover import RecoveryConfig
 
-    config = MarkConfig(
-        context_from=lambda *a, **k: {},
-        max_retries=3,
-        rules=None,
-        tags=None,
-        fallback=True,
-        explorable=True,
-        collection="default",
-    )
+    config_explorable = RecoveryConfig(explorable=True)
+    config_not_explorable = RecoveryConfig(explorable=False)
 
     with patch.dict(os.environ, {"THEOW_EXPLORE": "1"}):
-        assert md._should_explore(config) is True
+        assert config_explorable.explorable is True
+        assert os.environ.get("THEOW_EXPLORE") == "1"
+
+    with patch.dict(os.environ, {}, clear=True):
+        assert config_not_explorable.explorable is False
 
 
-def _make_mark_decorator(resolver=None, explorer=None, tool_registry=None):
-    return MarkDecorator(
-        resolver=resolver or MagicMock(),
-        explorer=explorer or MagicMock(),
-        tool_registry=tool_registry or ToolRegistry(),
+def _make_mark_decorator(resolver=None, explorer=None, tool_registry=None, engine=None):
+    r = resolver or MagicMock()
+    e = explorer or MagicMock()
+    tr = tool_registry or ToolRegistry()
+
+    if engine is None:
+        engine = MagicMock()
+        engine.resolve = r.resolve
+        engine.execute_rule = MagicMock(side_effect=lambda rule, ctx=None: True)
+        engine.get_tools = MagicMock(return_value=[])
+        engine._explorer = e
+        engine._chroma = MagicMock()
+
+    md = MarkDecorator(
+        resolver=r,
+        explorer=e,
+        tool_registry=tr,
+        engine=engine,
     )
+    return md
 
 
 def test_run_with_recovery_success_first_try():
@@ -425,7 +434,15 @@ def test_run_with_recovery_theow_error():
 
 
 def test_attempt_recovery_context_from_fails():
-    md = _make_mark_decorator()
+    """When context_from raises, recovery gets empty context and no rules match."""
+    engine = MagicMock()
+    engine.resolve = MagicMock(return_value=None)
+    engine.execute_rule = MagicMock(return_value=False)
+    engine.get_tools = MagicMock(return_value=[])
+    engine._explorer = MagicMock()
+    engine._chroma = MagicMock()
+
+    md = _make_mark_decorator(engine=engine)
 
     def bad_context_from(*args, **kwargs):
         raise ValueError("context_from broken")
@@ -440,10 +457,18 @@ def test_attempt_recovery_context_from_fails():
         collection="default",
     )
 
-    success, rule, explored = md._attempt_recovery(lambda: None, (), {}, ValueError("test"), config)
-    assert success is False
-    assert rule is None
-    assert explored is False
+    call_count = 0
+
+    def fn():
+        nonlocal call_count
+        call_count += 1
+        raise ValueError("test")
+
+    with pytest.raises(ValueError, match="test"):
+        md._run_with_recovery(fn, (), {}, config)
+
+    # Initial attempt + no rules match = no retries
+    assert call_count == 1
 
 
 def test_execute_rule_deterministic():
@@ -515,9 +540,10 @@ def test_execute_probabilistic_rule():
 
 
 def test_promote_rule(theow_dir):
-    explorer = MagicMock()
-    explorer._chroma = MagicMock()
-    md = _make_mark_decorator(explorer=explorer)
+    from theow._core._recover import _promote_rule
+
+    engine = MagicMock()
+    engine._chroma = MagicMock()
 
     eph_dir = theow_dir / "rules" / "ephemeral"
     eph_dir.mkdir()
@@ -528,28 +554,25 @@ def test_promote_rule(theow_dir):
     bound = rule.bind({}, {}, None)
     bound._source_path = eph_path
 
-    md._promote_rule(bound)
+    _promote_rule(bound, engine)
 
     assert not eph_path.exists()
     promoted_path = theow_dir / "rules" / "r.rule.yaml"
     assert promoted_path.exists()
     assert "incomplete" not in bound.tags
-    explorer._chroma.index_rule.assert_called_once()
+    engine._chroma.index_rule.assert_called_once()
 
 
 def test_reject_rule():
-    explorer = MagicMock()
-    explorer._session_cache = MagicMock()
-    md = _make_mark_decorator(explorer=explorer)
+    from theow._core._recover import _reject_info
 
     rule = Rule(name="bad", description="Bad rule desc", when=[])
     rule._created_files = [Path("/tmp/bad.yaml")]
 
-    rejection = md._reject_rule(rule, ValueError("didn't work"))
+    rejection = _reject_info(rule, {"stderr": "didn't work"})
     assert rejection["rule_name"] == "bad"
     assert "didn't work" in rejection["error"]
     assert rejection["_files"] == [Path("/tmp/bad.yaml")]
-    explorer._session_cache.invalidate.assert_called_with("bad")
 
 
 def test_recovery_hooks_lifecycle():

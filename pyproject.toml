@@ -14,7 +14,11 @@ dependencies = [
     "github-copilot-sdk>=0.1",
     "rich>=13.0",
     "structlog>=24.0",
+    "typer>=0.12",
 ]
+
+[project.scripts]
+theow = "theow._cli:app"
 
 [project.optional-dependencies]
 daemon = [

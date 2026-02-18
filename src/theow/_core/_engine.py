@@ -92,6 +92,7 @@ class Theow:
             resolver=self._resolver,
             explorer=self._explorer,
             tool_registry=self._tool_registry,
+            engine=self,
         )
 
         self._sync_on_startup()
@@ -155,6 +156,14 @@ class Theow:
             tags=tags,
             fallback=fallback,
         )
+
+    def execute_rule(self, rule: Rule, context: dict[str, Any] | None = None) -> bool:
+        """Execute a resolved rule's action. Returns True if successful."""
+        return self._mark_decorator._execute_rule(rule, context)
+
+    def get_tools(self) -> list[Callable[..., Any]]:
+        """Get all registered tools as a list."""
+        return list(self._tool_registry.get_all().values())
 
     def explore(
         self,
