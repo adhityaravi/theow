@@ -2,6 +2,6 @@
 
 from theow._core._engine import Theow
 from theow._core._models import Action, Fact, LLMConfig, Rule
-from theow._core._decorators import action
+from theow._core._decorators import action, tool
 
-__all__ = ["Theow", "Rule", "Fact", "Action", "LLMConfig", "action"]
+__all__ = ["Theow", "Rule", "Fact", "Action", "LLMConfig", "action", "tool"]

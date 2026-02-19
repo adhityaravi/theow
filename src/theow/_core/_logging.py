@@ -18,6 +18,8 @@ COMPONENT_MAP = {
     "theow._core._decorators": "recovery",
     "theow._core._engine": "engine",
     "theow._core._chroma_store": "chroma",
+    "theow._core._recover": "recovery",
+    "theow._cli._run": "cli",
 }
 
 

@@ -70,6 +70,14 @@ def test_get_logger_fallback_component():
 
 
 def test_component_map_coverage():
-    expected_components = {"llm-gateway", "explorer", "resolver", "recovery", "engine", "chroma"}
+    expected_components = {
+        "llm-gateway",
+        "explorer",
+        "resolver",
+        "recovery",
+        "engine",
+        "chroma",
+        "cli",
+    }
     actual_components = set(COMPONENT_MAP.values())
     assert actual_components == expected_components
