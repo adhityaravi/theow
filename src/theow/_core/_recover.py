@@ -53,11 +53,13 @@ def recover(
         1. Try run(), return if succeeds (no hooks on initial attempt)
         2. For each retry:
            a. before_attempt - lifecycle hook before recovery
-           b. _attempt_fix - find rule via resolve/explore, execute action
-           c. run() again to verify if fix worked
-           d. after_attempt - lifecycle hook after recovery
-           e. If success: promote ephemeral rule, return
-           f. If failure: reject ephemeral rule, update context
+           b. _attempt_fix - find rule via resolve or explore
+           c. If exploration ran: after_attempt(False) + before_attempt to
+              reset the workspace, then execute rule action on clean state
+           d. run() again to verify if fix worked
+           e. after_attempt - lifecycle hook after recovery
+           f. If success: promote ephemeral rule, return
+           g. If failure: reject ephemeral rule, update context
         3. _cleanup - clean up ephemeral files after all retries exhausted
 
     Theow never blocks the consumer pipeline. If recovery fails or theow
@@ -92,7 +94,7 @@ def recover(
                     logger.error("Setup hook failed", error=str(hook_err))
                     break
 
-            rule = _attempt_fix(
+            rule, explored = _attempt_fix(
                 attempt.context,
                 engine,
                 config,
@@ -106,6 +108,25 @@ def recover(
                 _call_after(after_attempt, hook_state, attempt_num, False)
                 break
 
+            if explored:
+                # LLM exploration dirtied the workspace. Reset via the
+                # existing hooks so the rule action runs on a clean baseline.
+                _call_after(after_attempt, hook_state, attempt_num, False)
+                if before_attempt:
+                    try:
+                        hook_state = before_attempt(hook_state, attempt_num) or hook_state
+                    except Exception as hook_err:
+                        logger.error("Setup hook failed after explore reset", error=str(hook_err))
+                        break
+                if not engine.execute_rule(rule, attempt.context):
+                    _call_after(after_attempt, hook_state, attempt_num, False)
+                    failed_rules.append(rule.name)
+                    if rule.is_ephemeral:
+                        rejected.append(_reject_info(rule, attempt.context))
+                        if engine._explorer._session_cache:
+                            engine._explorer._session_cache.invalidate(rule.name)
+                    continue
+
             attempt = run()
 
             _call_after(after_attempt, hook_state, attempt_num, attempt.success)
@@ -115,6 +136,8 @@ def recover(
                     _promote_rule(rule, engine)
                 return attempt
 
+            # Rule action ran but function still failed; don't retry this rule.
+            failed_rules.append(rule.name)
             if rule.is_ephemeral:
                 rejected.append(_reject_info(rule, attempt.context))
                 if engine._explorer._session_cache:
@@ -134,8 +157,12 @@ def _attempt_fix(
     rejected: list[dict[str, Any]],
     attempt_num: int,
     tracing: TracingInfo | None,
-) -> Rule | None:
-    """Find and execute a recovery rule. Returns applied rule or None."""
+) -> tuple[Rule | None, bool]:
+    """Find and execute a recovery rule.
+
+    Returns:
+        (rule, explored) where explored=True if LLM exploration ran.
+    """
     rule = engine.resolve(
         context=context,
         collection=config.collection,
@@ -146,7 +173,7 @@ def _attempt_fix(
 
     if rule and rule.name not in failed_rules:
         if engine.execute_rule(rule, context):
-            return rule
+            return rule, False
         failed_rules.append(rule.name)
 
     if config.explorable and os.environ.get("THEOW_EXPLORE") == "1":
@@ -159,13 +186,12 @@ def _attempt_fix(
             rejected_attempts=rejected,
             attempt_number=attempt_num,
         )
-        if explored_rule:
-            if engine.execute_rule(explored_rule, context):
-                return explored_rule
+        if explored_rule and explored_rule.name not in failed_rules:
+            return explored_rule, True
         if not explored:
-            return None
+            return None, False
 
-    return None
+    return None, False
 
 
 def _promote_rule(rule: Rule, engine: Theow) -> None:
