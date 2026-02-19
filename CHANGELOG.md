@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.7](https://github.com/adhityaravi/theow/compare/theow-v0.0.6...theow-v0.0.7) (2026-02-19)
+
+
+### Features
+
+* cli mode ([#6](https://github.com/adhityaravi/theow/issues/6)) ([58baa4f](https://github.com/adhityaravi/theow/commit/58baa4ffffdb70efa159b5770452a49633131093))
+
 ## [0.0.6](https://github.com/adhityaravi/theow/compare/theow-v0.0.5...theow-v0.0.6) (2026-02-17)
 
 
