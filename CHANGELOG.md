@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.8](https://github.com/adhityaravi/theow/compare/theow-v0.0.7...theow-v0.0.8) (2026-02-20)
+
+
+### Bug Fixes
+
+* enforce token limit on anthropic and gemini ([07eb0a7](https://github.com/adhityaravi/theow/commit/07eb0a73e10f52a2fb3f69980786ffea4caf767b))
+
 ## [0.0.7](https://github.com/adhityaravi/theow/compare/theow-v0.0.6...theow-v0.0.7) (2026-02-19)
 
 
