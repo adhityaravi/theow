@@ -169,6 +169,7 @@ def _attempt_fix(
         rules=config.rules,
         tags=config.tags,
         fallback=config.fallback,
+        n_results=config.max_retries,
     )
 
     if rule and rule.name not in failed_rules:

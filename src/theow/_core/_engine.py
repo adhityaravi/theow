@@ -147,6 +147,7 @@ class Theow:
         rules: list[str] | None = None,
         tags: list[str] | None = None,
         fallback: bool = True,
+        n_results: int = 10,
     ) -> Rule | None:
         """Match context against rules directly."""
         return self._resolver.resolve(
@@ -155,6 +156,7 @@ class Theow:
             rules=rules,
             tags=tags,
             fallback=fallback,
+            n_results=n_results,
         )
 
     def execute_rule(self, rule: Rule, context: dict[str, Any] | None = None) -> bool:

@@ -56,7 +56,9 @@ class AnthropicGateway(LLMGateway):
 
         state = SessionState()
 
-        while state.tool_calls < max_calls:
+        while state.tool_calls < max_calls and not (
+            max_tokens > 0 and state.tokens_used > max_tokens
+        ):
             response = self._call_model(messages, declarations, state)
             if response is None:
                 break
