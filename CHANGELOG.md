@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.9](https://github.com/adhityaravi/theow/compare/theow-v0.0.8...theow-v0.0.9) (2026-02-21)
+
+
+### Features
+
+* improve theows memory ops ([61b6e74](https://github.com/adhityaravi/theow/commit/61b6e74ed770c2d455210f12435c0c10068b48be))
+
 ## [0.0.8](https://github.com/adhityaravi/theow/compare/theow-v0.0.7...theow-v0.0.8) (2026-02-20)
 
 
