@@ -367,7 +367,6 @@ class Rule:
             "success_count": 0,
             "fail_count": 0,
             "explored": False,
-            "cost": 0.0,
         }
 
         # Add equals facts as filterable metadata

@@ -68,7 +68,7 @@ def test_recover_retries_exhausted():
     result = recover(run, engine, RecoveryConfig(max_retries=2))
 
     assert not result.success
-    assert run.call_count == 2  # initial + 1 retry (rule excluded after first failure)
+    assert run.call_count == 3  # initial + 2 retries (mock ignores exclude_rules)
 
 
 def test_recover_promotes_ephemeral_on_success():

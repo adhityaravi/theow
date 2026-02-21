@@ -45,6 +45,7 @@ def run(
         session_limit=config.engine.session_limit,
         max_tool_calls_per_session=config.engine.max_tool_calls_per_session,
         max_tokens_per_session=config.engine.max_tokens_per_session,
+        archive_llm_attempt=config.engine.archive_llm_attempt,
     )
 
     _register_builtin_tools(engine)

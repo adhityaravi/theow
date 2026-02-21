@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -51,11 +52,12 @@ class Done(ExplorationSignal):
 
 
 # Signal tool functions (module-level for reuse)
-def _give_up(reason: str) -> None:
+def _give_up(reason: str = "") -> None:
     """Signal that this problem cannot or should not be automated.
 
     Args:
-        reason: Clear explanation of why automation was declined.
+        reason: Clear explanation of why automation was declined. Omit when
+                giving up based on a prior observation to avoid duplicate logs.
     """
     raise GiveUp(reason)
 
@@ -100,15 +102,21 @@ def make_signal_tools() -> list[Callable[..., Any]]:
     return [_give_up, _request_templates, _submit_rule]
 
 
-def make_direct_fix_tools() -> list[Callable[..., Any]]:
+def make_direct_fix_tools(rules_dir: Path | None = None) -> list[Callable[..., Any]]:
     """Signal tools for direct fix mode (probabilistic rules)."""
-    return [_give_up, _done]
+    tools: list[Callable[..., Any]] = [_give_up, _done]
+    if rules_dir:
+        tools.append(_make_failed_rules_tool(rules_dir))
+        tools.append(_make_observations_tool(rules_dir))
+    return tools
 
 
-def make_search_tools(chroma: ChromaStore, collection: str) -> list[Callable[..., Any]]:
+def make_search_tools(
+    chroma: ChromaStore, collection: str, rules_dir: Path | None = None
+) -> list[Callable[..., Any]]:
     """Create search tools bound to chroma store."""
 
-    def search_rules(query: str) -> list[dict[str, Any]]:
+    def _search_rules(query: str) -> list[dict[str, Any]]:
         """Search existing rules by semantic similarity.
 
         Returns list of matching rules with their file names (e.g., 'rule_name.rule.yaml').
@@ -119,11 +127,11 @@ def make_search_tools(chroma: ChromaStore, collection: str) -> list[Callable[...
             for name, dist, meta in results
         ]
 
-    def search_actions(query: str) -> list[dict[str, Any]]:
+    def _search_actions(query: str) -> list[dict[str, Any]]:
         """Search existing actions by semantic similarity."""
         return chroma.query_actions(query_text=query, n_results=5)
 
-    def list_rules() -> list[dict[str, str]]:
+    def _list_rules() -> list[dict[str, str]]:
         """List all rules in the current collection.
 
         Returns list of dicts with 'name' and 'file' (e.g., 'rule_name.rule.yaml').
@@ -131,18 +139,83 @@ def make_search_tools(chroma: ChromaStore, collection: str) -> list[Callable[...
         names = chroma.list_rules(collection)
         return [{"name": name, "file": f"{name}.rule.yaml"} for name in names]
 
-    def list_actions() -> list[str]:
+    def _list_actions() -> list[str]:
         """List all action names."""
         return chroma.list_actions()
 
-    return [search_rules, search_actions, list_rules, list_actions]
+    tools: list[Callable[..., Any]] = [_search_rules, _search_actions, _list_rules, _list_actions]
+    if rules_dir:
+        tools.append(_make_failed_rules_tool(rules_dir))
+        tools.append(_make_observations_tool(rules_dir))
+    return tools
+
+
+def _make_failed_rules_tool(rules_dir: Path) -> Callable[..., Any]:
+    """Create a tool that lists archived failed rules."""
+    failed_dir = rules_dir / "failed"
+
+    def _list_failed_rules() -> list[dict[str, Any]]:
+        """List previously failed rules and their error context.
+
+        Use this to learn what approaches were already tried and avoid repeating them.
+        Returns rule names, descriptions, and the errors that caused rejection.
+        """
+        if not failed_dir.exists():
+            return []
+
+        results = []
+        for path in sorted(failed_dir.glob("*.rule.yaml")):
+            entry: dict[str, Any] = {"name": path.stem, "file": path.name}
+            sidecar = path.with_suffix(path.suffix + ".json")
+            if sidecar.exists():
+                try:
+                    entry["metadata"] = json.loads(sidecar.read_text())
+                except Exception:
+                    pass
+            results.append(entry)
+        return results
+
+    return _list_failed_rules
+
+
+def _make_observations_tool(rules_dir: Path) -> Callable[..., Any]:
+    """Create a tool that searches past LLM attempt observations."""
+    observations_path = rules_dir.parent / "observations.jsonl"
+
+    def _search_observations(query: str = "") -> list[dict[str, Any]]:
+        """Search past LLM attempt observations for patterns and lessons learned.
+
+        Returns entries where the query substring matches any value.
+        Each entry has an "outcome" field ("success" or "failure").
+        Use this to learn from previous attempts and avoid repeating mistakes.
+
+        Args:
+            query: Substring to search for across all observation fields. Empty returns all.
+        """
+        if not observations_path.exists():
+            return []
+
+        results = []
+        for line in observations_path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except Exception:
+                continue
+            if not query or any(query.lower() in str(v).lower() for v in entry.values()):
+                results.append(entry)
+        return results
+
+    return _search_observations
 
 
 def make_validation_tools(rules_dir: Path, context: dict[str, Any]) -> list[Callable[..., Any]]:
     """Create tools for validating rules against current context."""
     from theow._core._models import Rule
 
-    def test_rule_match(rule_file: str) -> dict[str, Any]:
+    def _test_rule_match(rule_file: str) -> dict[str, Any]:
         """Test if a rule's when-facts match the current error context.
 
         Call this BEFORE submit_rule() to verify your patterns are correct.
@@ -195,14 +268,14 @@ def make_validation_tools(rules_dir: Path, context: dict[str, Any]) -> list[Call
             "hint": "Fix failing facts before calling submit_rule()" if not all_match else None,
         }
 
-    return [test_rule_match]
+    return [_test_rule_match]
 
 
 def make_ephemeral_tools(rules_dir: Path) -> list[Callable[..., Any]]:
     """Create tools for accessing ephemeral rules from current/previous attempts."""
     ephemeral_dir = rules_dir / "ephemeral"
 
-    def list_ephemeral_rules() -> list[dict[str, Any]]:
+    def _list_ephemeral_rules() -> list[dict[str, Any]]:
         """List ephemeral rules from current or previous exploration attempts.
 
         Returns list of ephemeral rules with name, file, tags, description, and notes.
@@ -229,7 +302,7 @@ def make_ephemeral_tools(rules_dir: Path) -> list[Callable[..., Any]]:
                 continue
         return results
 
-    def read_ephemeral_rule(name: str) -> str:
+    def _read_ephemeral_rule(name: str) -> str:
         """Read the full content of an ephemeral rule to continue from.
 
         Args:
@@ -242,7 +315,7 @@ def make_ephemeral_tools(rules_dir: Path) -> list[Callable[..., Any]]:
             return f"Error: Ephemeral rule '{name}' not found"
         return path.read_text()
 
-    def write_rule(name: str, content: str) -> dict[str, str]:
+    def _write_rule(name: str, content: str) -> dict[str, str]:
         """Write a rule file to the ephemeral folder.
 
         Args:
@@ -256,7 +329,7 @@ def make_ephemeral_tools(rules_dir: Path) -> list[Callable[..., Any]]:
         path.write_text(content)
         return {"path": str(path), "message": f"Rule written to {path}"}
 
-    def write_action(name: str, content: str) -> dict[str, str]:
+    def _write_action(name: str, content: str) -> dict[str, str]:
         """Write an action file to the actions folder.
 
         Args:
@@ -271,7 +344,7 @@ def make_ephemeral_tools(rules_dir: Path) -> list[Callable[..., Any]]:
         path.write_text(content)
         return {"path": str(path), "message": f"Action written to {path}"}
 
-    return [list_ephemeral_rules, read_ephemeral_rule, write_rule, write_action]
+    return [_list_ephemeral_rules, _read_ephemeral_rule, _write_rule, _write_action]
 
 
 # Theow external tools for consumers. Not registered by default, consumers can choose to register them.

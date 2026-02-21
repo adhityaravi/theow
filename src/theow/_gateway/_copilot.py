@@ -229,6 +229,8 @@ class CopilotGateway(LLMGateway):
             )
         except ExplorationSignal as sig:
             self._signal = sig
+            if self._session:
+                asyncio.ensure_future(self._session.abort())
             return ToolResult(
                 textResultForLlm=f"Signal: {type(sig).__name__}",
                 resultType="failure",

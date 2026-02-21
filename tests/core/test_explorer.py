@@ -88,7 +88,7 @@ def test_build_error_prompt_with_continuation():
         attempt_number=3,
     )
     assert "attempt 3" in prompt
-    assert "list_ephemeral_rules()" in prompt
+    assert "_list_ephemeral_rules()" in prompt
 
 
 def test_build_error_prompt_with_rejected_attempts():

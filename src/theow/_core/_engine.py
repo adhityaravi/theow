@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Callable, ParamSpec, TypeVar
 
@@ -38,6 +39,7 @@ class Theow:
         session_limit: int = 20,
         max_tool_calls_per_session: int = 30,
         max_tokens_per_session: int = 8192,
+        archive_llm_attempt: bool = False,
     ) -> None:
         self._name = name
         set_engine_name(name)
@@ -48,6 +50,7 @@ class Theow:
         self._session_limit = session_limit
         self._max_tool_calls_per_session = max_tool_calls_per_session
         self._max_tokens_per_session = max_tokens_per_session
+        self._archive_llm_attempt = archive_llm_attempt
 
         self._gateway: LLMGateway | None = None
         self._secondary_gateway: LLMGateway | None = None
@@ -86,6 +89,7 @@ class Theow:
             session_limit=self._session_limit,
             max_tool_calls_per_session=self._max_tool_calls_per_session,
             max_tokens_per_session=self._max_tokens_per_session,
+            archive_llm_attempt=self._archive_llm_attempt,
         )
 
         self._mark_decorator = MarkDecorator(
@@ -148,6 +152,7 @@ class Theow:
         tags: list[str] | None = None,
         fallback: bool = True,
         n_results: int = 10,
+        exclude_rules: list[str] | None = None,
     ) -> Rule | None:
         """Match context against rules directly."""
         return self._resolver.resolve(
@@ -157,6 +162,7 @@ class Theow:
             tags=tags,
             fallback=fallback,
             n_results=n_results,
+            exclude_rules=exclude_rules,
         )
 
     def execute_rule(self, rule: Rule, context: dict[str, Any] | None = None) -> bool:
@@ -199,6 +205,13 @@ class Theow:
 
         if self._llm_secondary:
             self._secondary_gateway = create_gateway(self._llm_secondary)
+            self._explorer.set_secondary_gateway(self._secondary_gateway)
+
+    def _flush_observation(self, observation: dict) -> None:
+        """Append an observation entry to observations.jsonl."""
+        path = self._theow_dir / "observations.jsonl"
+        with path.open("a") as f:
+            f.write(json.dumps(observation, default=str) + "\n")
 
     def meow(self) -> None:
         """Print stats. 🐱"""

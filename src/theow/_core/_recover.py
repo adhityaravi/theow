@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
 
 from theow._core._decorators import TracingInfo
@@ -105,13 +106,13 @@ def recover(
             )
 
             if rule is None:
-                _call_after(after_attempt, hook_state, attempt_num, False)
+                _teardown_failure(engine, hook_state, after_attempt, attempt_num)
                 break
 
             if explored:
                 # LLM exploration dirtied the workspace. Reset via the
                 # existing hooks so the rule action runs on a clean baseline.
-                _call_after(after_attempt, hook_state, attempt_num, False)
+                _teardown_failure(engine, hook_state, after_attempt, attempt_num)
                 if before_attempt:
                     try:
                         hook_state = before_attempt(hook_state, attempt_num) or hook_state
@@ -119,7 +120,8 @@ def recover(
                         logger.error("Setup hook failed after explore reset", error=str(hook_err))
                         break
                 if not engine.execute_rule(rule, attempt.context):
-                    _call_after(after_attempt, hook_state, attempt_num, False)
+                    engine._chroma.update_rule_stats(config.collection, rule.name, False)
+                    _teardown_failure(engine, hook_state, after_attempt, attempt_num)
                     failed_rules.append(rule.name)
                     if rule.is_ephemeral:
                         rejected.append(_reject_info(rule, attempt.context))
@@ -129,14 +131,29 @@ def recover(
 
             attempt = run()
 
-            _call_after(after_attempt, hook_state, attempt_num, attempt.success)
+            if attempt.success:
+                done_msg = engine._explorer._last_done_message
+                engine._explorer._last_done_message = None  # consume
+                if engine._archive_llm_attempt and done_msg:
+                    hook_state["_observation"] = {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "outcome": "success",
+                        "rule": rule.name,
+                        "reasoning": done_msg,
+                    }
+                _call_after(after_attempt, hook_state, attempt_num, True)
+                _flush_observation(engine, hook_state)
+            else:
+                _teardown_failure(engine, hook_state, after_attempt, attempt_num)
 
             if attempt.success:
+                engine._chroma.update_rule_stats(config.collection, rule.name, True)
                 if rule.is_ephemeral:
                     _promote_rule(rule, engine)
                 return attempt
 
             # Rule action ran but function still failed; don't retry this rule.
+            engine._chroma.update_rule_stats(config.collection, rule.name, False)
             failed_rules.append(rule.name)
             if rule.is_ephemeral:
                 rejected.append(_reject_info(rule, attempt.context))
@@ -170,11 +187,13 @@ def _attempt_fix(
         tags=config.tags,
         fallback=config.fallback,
         n_results=config.max_retries,
+        exclude_rules=failed_rules,
     )
 
-    if rule and rule.name not in failed_rules:
+    if rule:
         if engine.execute_rule(rule, context):
             return rule, False
+        engine._chroma.update_rule_stats(config.collection, rule.name, False)
         failed_rules.append(rule.name)
 
     if config.explorable and os.environ.get("THEOW_EXPLORE") == "1":
@@ -235,6 +254,41 @@ def _cleanup(engine: Theow, rejected: list[dict[str, Any]]) -> None:
         engine._explorer.cleanup(rejected)
     except Exception as cleanup_err:
         logger.error("Cleanup failed", error=str(cleanup_err))
+
+
+def _sync_give_up_reason(engine: Theow, hook_state: dict[str, Any]) -> None:
+    """Copy the explorer's give-up reason (if any) into hook_state."""
+    reason = engine._explorer._last_give_up_reason
+    engine._explorer._last_give_up_reason = None  # consume
+    if reason:
+        hook_state["_give_up_reason"] = reason
+        if engine._archive_llm_attempt:
+            hook_state["_observation"] = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "outcome": "failure",
+                "give_up_reason": reason,
+            }
+
+
+def _flush_observation(engine: Theow, hook_state: dict[str, Any]) -> None:
+    """Pop and persist any pending observation from hook_state."""
+    if not engine._archive_llm_attempt:
+        return
+    obs = hook_state.pop("_observation", None)
+    if obs:
+        engine._flush_observation(obs)
+
+
+def _teardown_failure(
+    engine: Theow,
+    hook_state: dict[str, Any],
+    after_attempt: Callable[[dict[str, Any], int, bool], None] | None,
+    attempt_num: int,
+) -> None:
+    """Handle failure: sync give-up reason, call teardown, flush observation."""
+    _sync_give_up_reason(engine, hook_state)
+    _call_after(after_attempt, hook_state, attempt_num, False)
+    _flush_observation(engine, hook_state)
 
 
 def _call_after(

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import inspect
+import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -49,6 +51,7 @@ class Explorer:
         session_limit: int = 20,
         max_tool_calls_per_session: int = 30,
         max_tokens_per_session: int = 8192,
+        archive_llm_attempt: bool = False,
     ) -> None:
         self._chroma = chroma
         self._gateway = gateway
@@ -57,13 +60,31 @@ class Explorer:
         self._session_limit = session_limit
         self._max_tool_calls_per_session = max_tool_calls_per_session
         self._max_tokens_per_session = max_tokens_per_session
+        self._archive_llm_attempt = archive_llm_attempt
+        self._secondary_gateway: LLMGateway | None = None
         self._session_count = 0
         self._session_cache: SessionCache | None = None
         self._pending_cleanup: list[Path] = []  # Files to clean up after all retries
+        self._last_give_up_reason: str | None = None
+        self._last_done_message: str | None = None
 
     def set_gateway(self, gateway: LLMGateway) -> None:
         """Set the LLM gateway (for lazy initialization)."""
         self._gateway = gateway
+
+    def set_secondary_gateway(self, gateway: LLMGateway) -> None:
+        """Set the fallback LLM gateway for when the primary fails."""
+        self._secondary_gateway = gateway
+
+    @property
+    def _gateways(self) -> list[LLMGateway]:
+        """Return all configured gateways (primary + secondary) for iteration."""
+        gws: list[LLMGateway] = []
+        if self._gateway:
+            gws.append(self._gateway)
+        if self._secondary_gateway:
+            gws.append(self._secondary_gateway)
+        return gws
 
     def explore(
         self,
@@ -156,7 +177,7 @@ class Explorer:
             (rule, explored) tuple where explored=True indicates exploration was attempted.
         """
         signal_tools = make_signal_tools()
-        search_tools = make_search_tools(self._chroma, collection)
+        search_tools = make_search_tools(self._chroma, collection, self._rules_dir)
         ephemeral_tools = make_ephemeral_tools(self._rules_dir)
         validation_tools = make_validation_tools(self._rules_dir, context)
         all_tools = signal_tools + search_tools + ephemeral_tools + validation_tools + tools
@@ -179,15 +200,15 @@ class Explorer:
         )
 
         # Copilot SDK can't interrupt mid-turn, needs rules_dir to return templates inline
-        if self._gateway:
-            self._gateway.set_gateway_config({"rules_dir": self._rules_dir})
+        for gw in self._gateways:
+            gw.set_gateway_config({"rules_dir": self._rules_dir})
 
         signal = self._converse(messages, all_tools)
         result = self._handle_signal(signal, messages, all_tools, context, collection)
 
         # Reset gateway state after conversation ends
-        if self._gateway:
-            self._gateway.reset()
+        for gw in self._gateways:
+            gw.reset()
 
         return result
 
@@ -204,18 +225,20 @@ class Explorer:
                 "max_tool_calls_per_session": self._max_tool_calls_per_session,
                 "max_tokens_per_session": self._max_tokens_per_session,
             }
-        try:
-            self._gateway.conversation(
-                messages=messages,
-                tools=tools,
-                budget=budget,
-            )
-            return None
-        except ExplorationSignal as signal:
-            return signal
-        except Exception as e:
-            logger.error("Conversation failed", error=str(e))
-            return None
+
+        for i, gw in enumerate(self._gateways):
+            try:
+                gw.conversation(messages=messages, tools=tools, budget=budget)
+                return None
+            except ExplorationSignal as signal:
+                return signal
+            except Exception as e:
+                if i < len(self._gateways) - 1:
+                    logger.warning("LLM failed, trying next gateway", error=str(e))
+                else:
+                    logger.error("Conversation failed", error=str(e))
+
+        return None
 
     def _handle_signal(
         self,
@@ -242,6 +265,7 @@ class Explorer:
                 return None, True  # explored=True, no rule to validate
 
             case GiveUp(reason=reason):
+                self._last_give_up_reason = reason
                 logger.warning("Exploration unsuccessful", reason=reason)
                 return None, True
 
@@ -287,7 +311,7 @@ class Explorer:
 ## Continuation
 
 This is attempt {attempt_number}. Previous exploration attempts may have saved
-incomplete rules. Use `list_ephemeral_rules()` to check for work to continue from.
+incomplete rules. Use `_list_ephemeral_rules()` to check for work to continue from.
 """
 
         rejected_section = ""
@@ -474,23 +498,28 @@ Try a different approach."""
 
         Returns True if LLM signaled Done, False otherwise.
         """
+        self._last_give_up_reason = None
+        self._last_done_message = None
+
         if self._gateway is None:
             logger.warning("Cannot run LLM action: no LLM configured")
             return False
 
-        all_tools = make_direct_fix_tools() + tools
+        all_tools = make_direct_fix_tools(self._rules_dir) + tools
 
         messages = [{"role": "user", "content": prompt}]
         signal = self._converse(messages, all_tools, budget)
 
-        if self._gateway:
-            self._gateway.reset()
+        for gw in self._gateways:
+            gw.reset()
 
         match signal:
             case Done(message=message):
+                self._last_done_message = message
                 logger.debug("LLM action completed", message=message)
                 return True
             case GiveUp(reason=reason):
+                self._last_give_up_reason = reason
                 logger.warning("LLM action unsuccessful", reason=reason)
                 return False
             case None:
@@ -519,6 +548,28 @@ Try a different approach."""
             if action_path.exists():
                 self._pending_cleanup.append(action_path)
 
+    def _remove_or_archive(self, path: Path, metadata: dict[str, Any] | None = None) -> None:
+        """Delete a file, or archive it to rules_dir/failed/ when archiving is enabled."""
+        file_type = "Action" if path.suffix == ".py" else "Rule"
+
+        if not self._archive_llm_attempt:
+            path.unlink()
+            logger.debug(f"{file_type} file deleted", path=str(path))
+            return
+
+        failed_dir = self._rules_dir / "failed"
+        failed_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        archived_name = f"{path.stem}_{ts}{path.suffix}"
+        dest = failed_dir / archived_name
+        path.rename(dest)
+        logger.debug(f"{file_type} file archived", path=str(dest))
+
+        if metadata:
+            sidecar = dest.with_suffix(dest.suffix + ".json")
+            sidecar.write_text(json.dumps(metadata, indent=2, default=str))
+
     def cleanup(self, rejected_attempts: list[dict[str, Any]] | None = None) -> None:
         """Clean up all tracked files after retries exhausted.
 
@@ -526,23 +577,27 @@ Try a different approach."""
         - Files from rules that failed validation (tracked internally)
         - Files from rules that were valid but didn't fix the problem (passed in)
 
+        When archive_llm_attempt is enabled, files are moved to rules_dir/failed/
+        with JSON sidecar metadata instead of being deleted.
+
         Skips incomplete rules - those are kept for cross-session continuation.
         """
-        # Clean up files from rejected attempts (valid rules that didn't fix the problem)
+        # Handle files from rejected attempts (valid rules that didn't fix the problem)
         if rejected_attempts:
             for rejection in rejected_attempts:
                 if rejection.get("_incomplete"):
                     continue
+                metadata = {
+                    "rule_name": rejection.get("rule_name"),
+                    "error": rejection.get("error"),
+                    "description": rejection.get("description"),
+                }
                 for path in rejection.get("_files", []):
                     if path.exists():
-                        file_type = "Action" if path.suffix == ".py" else "Rule"
-                        path.unlink()
-                        logger.debug(f"{file_type} file deleted", path=str(path))
+                        self._remove_or_archive(path, metadata)
 
-        # Clean up files from failed validations
+        # Handle files from failed validations
         for path in self._pending_cleanup:
             if path.exists():
-                file_type = "Action" if path.suffix == ".py" else "Rule"
-                path.unlink()
-                logger.debug(f"{file_type} file deleted", path=str(path))
+                self._remove_or_archive(path)
         self._pending_cleanup = []

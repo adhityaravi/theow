@@ -294,7 +294,16 @@ class MarkDecorator:
 
         def after_attempt(state: dict[str, Any], attempt: int, success: bool) -> None:
             if config.teardown:
+                # Flow recovery metadata into the decorator's hook state
+                hook_state.update(
+                    {k: state[k] for k in ("_give_up_reason", "_observation") if k in state}
+                )
+                hook_state["_fn_name"] = getattr(fn, "__name__", "")
                 config.teardown(hook_state, attempt, success)
+                # Copy enriched observation back for recover() to flush
+                obs = hook_state.pop("_observation", None)
+                if obs:
+                    state["_observation"] = obs
 
         attempt = recover(
             run,

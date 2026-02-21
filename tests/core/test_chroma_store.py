@@ -1,7 +1,5 @@
 """Tests for chroma store."""
 
-import pytest
-
 from theow._core._chroma_store import ChromaStore, extract_query_text
 from theow._core._models import Fact, Rule
 
@@ -57,16 +55,15 @@ def test_chroma_update_rule_stats(temp_dir):
     rule = Rule(name="test_rule", description="Test", when=[], collection="default")
     store.index_rule(rule)
 
-    store.update_rule_stats("default", "test_rule", success=True, cost=0.01)
-    store.update_rule_stats("default", "test_rule", success=True, cost=0.02)
-    store.update_rule_stats("default", "test_rule", success=False, cost=0.01)
+    store.update_rule_stats("default", "test_rule", success=True)
+    store.update_rule_stats("default", "test_rule", success=True)
+    store.update_rule_stats("default", "test_rule", success=False)
 
     stats = store.get_all_rules_with_stats()
     rule_stats = next(s for s in stats if s["name"] == "test_rule")
 
     assert rule_stats["success_count"] == 2
     assert rule_stats["fail_count"] == 1
-    assert rule_stats["cost"] == pytest.approx(0.04)
 
 
 def test_chroma_metadata_keys(temp_dir):

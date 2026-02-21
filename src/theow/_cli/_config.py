@@ -17,6 +17,7 @@ class EngineConfig(BaseModel):
     session_limit: int = 20
     max_tool_calls_per_session: int = 30
     max_tokens_per_session: int = 8192
+    archive_llm_attempt: bool = False
 
 
 class ProfileConfig(BaseModel):

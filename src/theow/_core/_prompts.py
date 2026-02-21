@@ -28,20 +28,23 @@ Always use absolute paths when reading/writing files.
 
 ## Workflow
 
-1. **Check for prior work** - Use `list_ephemeral_rules()` to check for rules from
+1. **Check for prior work** - Use `_list_ephemeral_rules()` to check for rules from
    previous attempts. Continue from there if available.
 
-2. **Search first** - Use `search_rules()` and `search_actions()` to check if a
+2. **Learn from history** - Use `_list_failed_rules()` to see previously failed
+   approaches and avoid repeating them.
+
+3. **Search first** - Use `_search_rules()` and `_search_actions()` to check if a
    similar solution already exists. Don't reinvent the wheel.
 
-3. **Investigate** - Read files, run commands, understand the root cause.
+4. **Investigate** - Read files, run commands, understand the root cause.
 
-4. **Fix & verify** - Apply a fix and confirm it works.
+5. **Fix & verify** - Apply a fix and confirm it works.
 
-5. **Codify** - When ready to write a rule, call `request_templates()` to get
+6. **Codify** - When ready to write a rule, call `request_templates()` to get
    the rule/action syntax. Then write the files and call `submit_rule()`.
 
-If the problem can't or shouldn't be automated, call `give_up(reason)`.
+If the problem can't or shouldn't be automated, call `_give_up(reason)`.
 """
 
 ERROR = """## Error Context
@@ -63,7 +66,7 @@ Your `contains` and `regex` patterns must match text that ACTUALLY EXISTS in tho
 
 ### Rule Structure
 
-Use `write_rule(name, content)` with this YAML structure:
+Use `_write_rule(name, content)` with this YAML structure:
 
 ```yaml
 name: descriptive_snake_case
@@ -105,7 +108,7 @@ notes: |  # Optional - document findings if incomplete
 
 ### Action Structure (if needed)
 
-Use `write_action(name, content)` with this Python structure:
+Use `_write_action(name, content)` with this Python structure:
 
 ```python
 from theow import action
@@ -122,9 +125,9 @@ def action_name(workspace: str, expected: str) -> dict:
 - Solve the problem generically. NEVER hardcode case-specific values.
 
 **Workflow:**
-1. `write_rule(name, content)` → returns path in result
-2. `write_action(name, content)` if needed → returns path in result
-3. `test_rule_match(rule_path)` to verify patterns match context
+1. `_write_rule(name, content)` → returns path in result
+2. `_write_action(name, content)` if needed → returns path in result
+3. `_test_rule_match(rule_path)` to verify patterns match context
 4. Fix any failing facts and rewrite
 5. `submit_rule(rule_path, action_path)`
 """

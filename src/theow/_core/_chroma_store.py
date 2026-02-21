@@ -235,9 +235,8 @@ class ChromaStore:
         collection: str,
         rule_name: str,
         success: bool,
-        cost: float = 0.0,
     ) -> None:
-        """Update success/fail counts and cost for a rule."""
+        """Update success/fail counts for a rule."""
         coll = self._get_collection(collection)
 
         existing = coll.get(ids=[rule_name], include=["metadatas", "documents"])
@@ -252,8 +251,6 @@ class ChromaStore:
             new_meta["success_count"] = int(new_meta.get("success_count", 0)) + 1
         else:
             new_meta["fail_count"] = int(new_meta.get("fail_count", 0)) + 1
-
-        new_meta["cost"] = float(new_meta.get("cost", 0.0)) + cost
 
         coll.update(
             ids=[rule_name],
@@ -282,7 +279,6 @@ class ChromaStore:
                         "success_count": meta.get("success_count", 0),
                         "fail_count": meta.get("fail_count", 0),
                         "explored": meta.get("explored", False),
-                        "cost": meta.get("cost", 0.0),
                     }
                 )
 

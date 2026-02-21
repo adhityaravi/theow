@@ -22,29 +22,33 @@ def meow(chroma: ChromaStore) -> None:
 
     total_resolves = sum(r["success_count"] for r in rules)
     total_explores = sum(1 for r in rules if r["explored"])
-    total_cost = sum(r["cost"] for r in rules)
 
     console.print(f"🐱 [bold]{total_resolves}[/] resolves, [bold]{total_explores}[/] explores")
 
-    top_rules = sorted(rules, key=lambda r: r["success_count"], reverse=True)[:5]
-    if top_rules and any(r["success_count"] > 0 for r in top_rules):
-        table = Table(title="🐱 top rules", show_header=True, header_style="bold")
+    # Build unified table sorted by total hits descending
+    active_rules = [r for r in rules if r["success_count"] + r["fail_count"] > 0]
+    active_rules.sort(key=lambda r: r["success_count"] + r["fail_count"], reverse=True)
+
+    if active_rules:
+        table = Table(title="🐱 rules", show_header=True, header_style="bold")
         table.add_column("Rule", style="cyan")
-        table.add_column("Success", style="green", justify="right")
-        table.add_column("Fail", style="red", justify="right")
-        for r in top_rules:
-            if r["success_count"] > 0:
-                table.add_row(r["name"], str(r["success_count"]), str(r["fail_count"]))
-        console.print(table)
+        table.add_column("Hit", justify="right")
+        table.add_column("Fix", justify="right")
+        table.add_column("Rate", justify="right")
 
-    struggling = [r for r in rules if r["fail_count"] > r["success_count"]]
-    if struggling:
-        table = Table(title="🐱 struggling", show_header=True, header_style="bold")
-        table.add_column("Rule", style="yellow")
-        table.add_column("Success", justify="right")
-        table.add_column("Fail", style="red", justify="right")
-        for r in struggling:
-            table.add_row(r["name"], str(r["success_count"]), str(r["fail_count"]))
-        console.print(table)
+        for r in active_rules:
+            hits = r["success_count"] + r["fail_count"]
+            fixes = r["success_count"]
+            rate = (fixes / hits * 100) if hits else 0
+            rate_int = int(rate)
 
-    console.print(f"🐱 total cost: [bold green]${total_cost:.2f}[/]")
+            if rate >= 70:
+                rate_str = f"[green]{rate_int}%[/green]"
+            elif rate >= 30:
+                rate_str = f"[yellow]{rate_int}%[/yellow]"
+            else:
+                rate_str = f"[red]{rate_int}%[/red]"
+
+            table.add_row(r["name"], str(hits), str(fixes), rate_str)
+
+        console.print(table)
