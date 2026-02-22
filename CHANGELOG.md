@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.14](https://github.com/adhityaravi/theow/compare/theow-v0.0.13...theow-v0.0.14) (2026-02-22)
+
+
+### Bug Fixes
+
+* fixes give up calls ([ad74f9c](https://github.com/adhityaravi/theow/commit/ad74f9c39430632d476e8cd482d50fdbb321a461))
+
 ## [0.0.13](https://github.com/adhityaravi/theow/compare/theow-v0.0.12...theow-v0.0.13) (2026-02-22)
 
 
