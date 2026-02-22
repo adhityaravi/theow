@@ -107,13 +107,13 @@ def recover(
             )
 
             if rule is None:
-                _teardown_failure(engine, hook_state, after_attempt, attempt_num)
+                _teardown_failure(engine, hook_state, after_attempt, attempt_num, rule_name="explore")
                 break
 
             if explored:
                 # LLM exploration dirtied the workspace. Reset via the
                 # existing hooks so the rule action runs on a clean baseline.
-                _teardown_failure(engine, hook_state, after_attempt, attempt_num)
+                _teardown_failure(engine, hook_state, after_attempt, attempt_num, rule_name=rule.name)
                 if before_attempt:
                     try:
                         hook_state = before_attempt(hook_state, attempt_num) or hook_state
@@ -123,7 +123,7 @@ def recover(
                 if not engine.execute_rule(rule, attempt.context):
                     engine._chroma.update_rule_stats(config.collection, rule.name, False)
                     gave_up = engine._explorer._last_give_up_reason
-                    _teardown_failure(engine, hook_state, after_attempt, attempt_num)
+                    _teardown_failure(engine, hook_state, after_attempt, attempt_num, rule_name=rule.name)
                     failed_rules.append(rule.name)
                     if rule.is_ephemeral:
                         rejected.append(_reject_info(rule, attempt.context))
@@ -144,12 +144,12 @@ def recover(
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "outcome": "success",
                         "rule": rule.name,
-                        "reasoning": done_msg,
+                        "reason": done_msg,
                     }
                 _call_after(after_attempt, hook_state, attempt_num, True)
                 _flush_observation(engine, hook_state)
             else:
-                _teardown_failure(engine, hook_state, after_attempt, attempt_num)
+                _teardown_failure(engine, hook_state, after_attempt, attempt_num, rule_name=rule.name)
 
             if attempt.success:
                 engine._chroma.update_rule_stats(config.collection, rule.name, True)
@@ -262,7 +262,7 @@ def _cleanup(engine: Theow, rejected: list[dict[str, Any]]) -> None:
         logger.error("Cleanup failed", error=str(cleanup_err))
 
 
-def _sync_give_up_reason(engine: Theow, hook_state: dict[str, Any]) -> None:
+def _sync_give_up_reason(engine: Theow, hook_state: dict[str, Any], rule_name: str | None = None) -> None:
     """Copy the explorer's give-up reason (if any) into hook_state."""
     reason = engine._explorer._last_give_up_reason
     engine._explorer._last_give_up_reason = None  # consume
@@ -272,7 +272,8 @@ def _sync_give_up_reason(engine: Theow, hook_state: dict[str, Any]) -> None:
             hook_state["_observation"] = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "outcome": "failure",
-                "give_up_reason": reason,
+                "rule": rule_name or "explore",
+                "reason": reason,
             }
 
 
@@ -290,9 +291,10 @@ def _teardown_failure(
     hook_state: dict[str, Any],
     after_attempt: Callable[[dict[str, Any], int, bool], None] | None,
     attempt_num: int,
+    rule_name: str | None = None,
 ) -> None:
     """Handle failure: sync give-up reason, call teardown, flush observation."""
-    _sync_give_up_reason(engine, hook_state)
+    _sync_give_up_reason(engine, hook_state, rule_name)
     _call_after(after_attempt, hook_state, attempt_num, False)
     _flush_observation(engine, hook_state)
 
