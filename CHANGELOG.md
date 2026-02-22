@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.15](https://github.com/adhityaravi/theow/compare/theow-v0.0.14...theow-v0.0.15) (2026-02-22)
+
+
+### Miscellaneous
+
+* update observation schema ([59c22a8](https://github.com/adhityaravi/theow/commit/59c22a80f10d136023d6cec0931e39fef98f95d1))
+
 ## [0.0.14](https://github.com/adhityaravi/theow/compare/theow-v0.0.13...theow-v0.0.14) (2026-02-22)
 
 
