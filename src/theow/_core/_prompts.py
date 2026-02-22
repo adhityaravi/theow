@@ -76,6 +76,11 @@ description: >
 
 when:
   # All facts are ANDed - all must match
+  #
+  # IMPORTANT: Every contains/regex fact MUST have an `examples` list with
+  # at least one real error snippet from this investigation. Examples are
+  # used for vector search indexing - without them, the rule cannot be
+  # found by semantic similarity on future runs and will never be matched.
 
   # equals: exact string match (also used for Chroma metadata filtering)
   - fact: problem_type
@@ -84,13 +89,14 @@ when:
   # contains: substring match
   - fact: error_output
     contains: "connection refused"
+    examples:
+      - "connection refused on port 5432"
 
   # regex: pattern match with named captures
   # Named groups like (?P<name>...) become action params
   - fact: stderr
     regex: 'expected (?P<expected>\\S+) but got (?P<actual>\\S+)'
     examples:
-      # Include REAL examples from this investigation
       - "expected v2.0.0 but got v1.5.0"
 
 then:
@@ -121,6 +127,7 @@ def action_name(workspace: str, expected: str) -> dict:
 ```
 
 **Action guidelines:**
+- The `@action("name")` decorator MUST include the name string. Bare `@action` will silently fail.
 - Keep actions succinct and readable. Compose long functions into smaller helpers.
 - Solve the problem generically. NEVER hardcode case-specific values.
 

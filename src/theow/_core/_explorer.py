@@ -179,7 +179,7 @@ class Explorer:
         signal_tools = make_signal_tools()
         search_tools = make_search_tools(self._chroma, collection, self._rules_dir)
         ephemeral_tools = make_ephemeral_tools(self._rules_dir)
-        validation_tools = make_validation_tools(self._rules_dir, context)
+        validation_tools = make_validation_tools(self._rules_dir, context, self._action_registry)
         all_tools = signal_tools + search_tools + ephemeral_tools + validation_tools + tools
 
         tools_section = self._build_tools_section(all_tools)

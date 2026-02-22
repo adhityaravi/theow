@@ -16,12 +16,19 @@ from theow._core._models import Rule
 logger = get_logger(__name__)
 
 
-def extract_query_text(context: dict[str, Any]) -> str:
-    """Extract query text from context by finding the longest string value."""
+def extract_query_text(context: dict[str, Any], max_chars: int = 800) -> str:
+    """Extract query text from context by finding the longest string value.
+
+    Uses the tail of long strings because errors appear at the end of command
+    output, and the embedding model (MiniLM-L6-V2, 256 tokens) truncates
+    inputs beyond its context window.
+    """
     longest = ""
     for value in context.values():
         if isinstance(value, str) and len(value) > len(longest):
             longest = value
+    if len(longest) > max_chars:
+        longest = longest[-max_chars:]
     return longest
 
 

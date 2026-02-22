@@ -211,15 +211,19 @@ def _make_observations_tool(rules_dir: Path) -> Callable[..., Any]:
     return _search_observations
 
 
-def make_validation_tools(rules_dir: Path, context: dict[str, Any]) -> list[Callable[..., Any]]:
+def make_validation_tools(
+    rules_dir: Path, context: dict[str, Any], action_registry: Any = None
+) -> list[Callable[..., Any]]:
     """Create tools for validating rules against current context."""
     from theow._core._models import Rule
+
+    actions_dir = rules_dir.parent / "actions"
 
     def _test_rule_match(rule_file: str) -> dict[str, Any]:
         """Test if a rule's when-facts match the current error context.
 
         Call this BEFORE submit_rule() to verify your patterns are correct.
-        Returns which facts match and which fail, with actual vs expected values.
+        Validates both fact matching AND action file correctness.
 
         Args:
             rule_file: Path to the rule file to test.
@@ -242,7 +246,6 @@ def make_validation_tools(rules_dir: Path, context: dict[str, Any]) -> list[Call
 
             if match_result is None:
                 all_match = False
-                # Show what we expected vs what we got
                 condition = fact.equals or fact.contains or fact.regex
                 actual = str(value)[:200] if value else "(missing)"
                 results.append(
@@ -262,11 +265,28 @@ def make_validation_tools(rules_dir: Path, context: dict[str, Any]) -> list[Call
                     }
                 )
 
-        return {
-            "matches": all_match,
-            "facts": results,
-            "hint": "Fix failing facts before calling submit_rule()" if not all_match else None,
-        }
+        # Validate actions can be loaded
+        action_errors = []
+        if action_registry:
+            for rule_action in rule.then:
+                action_path = actions_dir / f"{rule_action.action}.py"
+                if not action_path.exists():
+                    action_errors.append(f"Action file not found: {action_path}")
+                    continue
+                action_registry._load_action_file(action_path)
+                if not action_registry.exists(rule_action.action):
+                    action_errors.append(
+                        f'Action "{rule_action.action}" not registered after loading '
+                        f'{action_path.name} - check @action("{rule_action.action}") decorator'
+                    )
+
+        ok = all_match and not action_errors
+        result: dict[str, Any] = {"matches": ok, "facts": results}
+        if action_errors:
+            result["action_errors"] = action_errors
+        if not ok:
+            result["hint"] = "Fix errors before calling submit_rule()"
+        return result
 
     return [_test_rule_match]
 
