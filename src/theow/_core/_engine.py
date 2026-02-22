@@ -128,6 +128,7 @@ class Theow:
         fallback: bool = True,
         explorable: bool = False,
         collection: str = "default",
+        hint: str | None = None,
         setup: Callable[[dict[str, Any], int], dict[str, Any] | None] | None = None,
         teardown: Callable[[dict[str, Any], int, bool], None] | None = None,
     ) -> Callable[[Callable[P, R]], Callable[P, R]]:
@@ -140,6 +141,7 @@ class Theow:
             fallback=fallback,
             explorable=explorable,
             collection=collection,
+            hint=hint,
             setup=setup,
             teardown=teardown,
         )
