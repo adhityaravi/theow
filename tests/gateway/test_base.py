@@ -50,6 +50,20 @@ def test_build_tool_declaration_custom_schema_key():
     assert "input_schema" not in decl
 
 
+def test_build_tool_declaration_array_has_items():
+    def tool(packages: list[str], counts: list[int]) -> None:
+        """Install packages."""
+
+    decl = build_tool_declaration("tool", tool)
+    packages_prop = decl["input_schema"]["properties"]["packages"]
+    assert packages_prop["type"] == "array"
+    assert packages_prop["items"] == {"type": "string"}
+
+    counts_prop = decl["input_schema"]["properties"]["counts"]
+    assert counts_prop["type"] == "array"
+    assert counts_prop["items"] == {"type": "integer"}
+
+
 def test_check_budget_warning_at_soft_limit():
     gw = _TestGateway()
     state = SessionState(tool_calls=24)

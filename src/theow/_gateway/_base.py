@@ -54,7 +54,15 @@ def build_tool_declaration(
         else:
             param_type = "string"
 
-        properties[param_name] = {"type": param_type}
+        prop: dict[str, Any] = {"type": param_type}
+
+        # Arrays require an "items" schema for strict providers (e.g. Copilot/OpenAI)
+        if param_type == "array":
+            args = getattr(param.annotation, "__args__", None)
+            item_type = TYPE_MAP.get(args[0], "string") if args else "string"
+            prop["items"] = {"type": item_type}
+
+        properties[param_name] = prop
 
         if param.default == inspect.Parameter.empty:
             required.append(param_name)
