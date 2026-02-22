@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.11](https://github.com/adhityaravi/theow/compare/theow-v0.0.10...theow-v0.0.11) (2026-02-22)
+
+
+### Features
+
+* adds a dec specific hint ([37582f2](https://github.com/adhityaravi/theow/commit/37582f2b5d003b68a607e50a6c2e645cc9ffd350))
+
 ## [0.0.10](https://github.com/adhityaravi/theow/compare/theow-v0.0.9...theow-v0.0.10) (2026-02-22)
 
 
