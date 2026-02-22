@@ -382,6 +382,8 @@ class MarkDecorator:
         # Resolve configured tools from registry
         tools = []
         for tool_name in rule.llm_config.tools:
+            if tool_name.startswith("_"):
+                continue  # internal tools provided by run_direct
             tool_fn = self._tool_registry.get(tool_name)
             if tool_fn:
                 tools.append(tool_fn)

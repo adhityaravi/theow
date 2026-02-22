@@ -1,6 +1,6 @@
 """Tests for pure recovery function."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from theow._core._recover import Attempt, RecoveryConfig, recover, _reject_info, _truncate
 
@@ -152,3 +152,35 @@ def test_reject_info_structure():
 def test_truncate():
     assert _truncate("short", 10) == "short"
     assert _truncate("a" * 300, 200) == "a" * 200 + "..."
+
+
+@patch("theow._core._recover._attempt_fix")
+def test_recover_breaks_on_give_up(mock_attempt_fix):
+    """Recovery loop should stop immediately when LLM explicitly gives up."""
+    rule = MagicMock()
+    rule.name = "explored-rule"
+    rule.is_ephemeral = False
+
+    engine = _make_engine(execute_return=False)
+
+    # Simulate LLM calling _give_up during execute_rule:
+    # the reason is set as a side effect of execution, not before.
+    def set_give_up_on_execute(*_args, **_kwargs):
+        engine._explorer._last_give_up_reason = "This error is unfixable"
+        return False
+
+    engine.execute_rule = MagicMock(side_effect=set_give_up_on_execute)
+
+    # _attempt_fix returns an explored rule (explored=True)
+    mock_attempt_fix.return_value = (rule, True)
+
+    fail = Attempt(success=False, context={"stderr": "unfixable error"})
+    run = MagicMock(return_value=fail)
+
+    result = recover(run, engine, RecoveryConfig(max_retries=3))
+
+    assert not result.success
+    # Only the initial run() call — the loop should break after first attempt
+    assert run.call_count == 1
+    # _attempt_fix called once, then loop breaks (not 3 times)
+    assert mock_attempt_fix.call_count == 1

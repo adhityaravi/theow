@@ -122,12 +122,16 @@ def recover(
                         break
                 if not engine.execute_rule(rule, attempt.context):
                     engine._chroma.update_rule_stats(config.collection, rule.name, False)
+                    gave_up = engine._explorer._last_give_up_reason
                     _teardown_failure(engine, hook_state, after_attempt, attempt_num)
                     failed_rules.append(rule.name)
                     if rule.is_ephemeral:
                         rejected.append(_reject_info(rule, attempt.context))
                         if engine._explorer._session_cache:
                             engine._explorer._session_cache.invalidate(rule.name)
+                    # If LLM explicitly gave up, don't waste budget on more attempts
+                    if gave_up:
+                        break
                     continue
 
             attempt = run()
