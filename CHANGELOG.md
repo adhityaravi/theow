@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.12](https://github.com/adhityaravi/theow/compare/theow-v0.0.11...theow-v0.0.12) (2026-02-22)
+
+
+### Bug Fixes
+
+* fix hint passthrough ([168e9b6](https://github.com/adhityaravi/theow/commit/168e9b6e8895e1d0853239c999747e9bb43daa55))
+
 ## [0.0.11](https://github.com/adhityaravi/theow/compare/theow-v0.0.10...theow-v0.0.11) (2026-02-22)
 
 
