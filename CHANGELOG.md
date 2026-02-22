@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.10](https://github.com/adhityaravi/theow/compare/theow-v0.0.9...theow-v0.0.10) (2026-02-22)
+
+
+### Features
+
+* improves vector search quality ([e6bb1cf](https://github.com/adhityaravi/theow/commit/e6bb1cff40f950b74bfee8451923e81e7ec39ed7))
+
 ## [0.0.9](https://github.com/adhityaravi/theow/compare/theow-v0.0.8...theow-v0.0.9) (2026-02-21)
 
 
