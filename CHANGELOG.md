@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.13](https://github.com/adhityaravi/theow/compare/theow-v0.0.12...theow-v0.0.13) (2026-02-22)
+
+
+### Bug Fixes
+
+* fixes tool building for openai like api ([3a230ba](https://github.com/adhityaravi/theow/commit/3a230bae3605dc704ac1d43a0bc98d278a7ee448))
+
 ## [0.0.12](https://github.com/adhityaravi/theow/compare/theow-v0.0.11...theow-v0.0.12) (2026-02-22)
 
 
