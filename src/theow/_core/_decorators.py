@@ -189,6 +189,7 @@ class MarkConfig:
     fallback: bool
     explorable: bool
     collection: str
+    hint: str | None = None
     setup: Callable[[dict[str, Any], int], dict[str, Any] | None] | None = None
     teardown: Callable[[dict[str, Any], int, bool], None] | None = None
 
@@ -217,6 +218,7 @@ class MarkDecorator:
         fallback: bool = True,
         explorable: bool = False,
         collection: str = "default",
+        hint: str | None = None,
         setup: Callable[[dict[str, Any], int], dict[str, Any] | None] | None = None,
         teardown: Callable[[dict[str, Any], int, bool], None] | None = None,
     ) -> Callable[[Callable[P, R]], Callable[P, R]]:
@@ -228,6 +230,7 @@ class MarkDecorator:
             fallback=fallback,
             explorable=explorable,
             collection=collection,
+            hint=hint,
             setup=setup,
             teardown=teardown,
         )
@@ -279,6 +282,7 @@ class MarkDecorator:
             collection=config.collection,
             fallback=config.fallback,
             explorable=config.explorable,
+            hint=config.hint,
         )
 
         # Wrap setup/teardown hooks to maintain hook_state

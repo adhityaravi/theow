@@ -24,6 +24,7 @@ def run(
     context: list[str] | None = None,
     tail: int | None = None,
     plugin: str | None = None,
+    hint: str | None = None,
     quiet: bool = False,
 ) -> int:
     """Execute a command with theow recovery. Returns exit code."""
@@ -35,6 +36,8 @@ def run(
         cli_overrides["explore"] = True
     if plugin:
         cli_overrides["plugin"] = plugin
+    if hint:
+        cli_overrides["hint"] = hint
 
     prof = resolve_profile(config, profile, cli_overrides)
 
@@ -92,6 +95,7 @@ def run(
         collection=prof.collection,
         fallback=prof.fallback,
         explorable=prof.explore,
+        hint=prof.hint,
     )
 
     attempt = recover(

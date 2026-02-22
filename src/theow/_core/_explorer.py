@@ -94,6 +94,7 @@ class Explorer:
         tracing: TracingInfo | None = None,
         rejected_attempts: list[dict[str, Any]] | None = None,
         attempt_number: int = 1,
+        hint: str | None = None,
     ) -> tuple[Rule | None, bool]:
         """Explore a novel situation using LLM.
 
@@ -128,7 +129,7 @@ class Explorer:
         self._session_count += 1
 
         rule, explored = self._run_conversation(
-            context, tools, collection, tracing, rejected_attempts, attempt_number
+            context, tools, collection, tracing, rejected_attempts, attempt_number, hint
         )
         if rule:
             self._session_cache.store(context, rule)
@@ -170,6 +171,7 @@ class Explorer:
         tracing: TracingInfo | None,
         rejected_attempts: list[dict[str, Any]] | None,
         attempt_number: int = 1,
+        hint: str | None = None,
     ) -> tuple[Rule | None, bool]:
         """Run multi-phase conversation with LLM.
 
@@ -190,6 +192,9 @@ class Explorer:
         )
         error_prompt = self._build_error_prompt(context, tracing, rejected_attempts, attempt_number)
         initial_prompt = intro + "\n" + error_prompt
+
+        if hint:
+            initial_prompt += f"\n\n## Caller Constraints\n\n{hint}"
         messages = [{"role": "user", "content": initial_prompt}]
 
         logger.debug(

@@ -30,6 +30,7 @@ class ProfileConfig(BaseModel):
     explore: bool = False
     fallback: bool = True
     plugin: str | None = None
+    hint: str | None = None
 
 
 class TheowConfig(BaseModel):

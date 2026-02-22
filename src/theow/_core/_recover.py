@@ -39,6 +39,7 @@ class RecoveryConfig:
     collection: str = "default"
     fallback: bool = True
     explorable: bool = False
+    hint: str | None = None
 
 
 def recover(
@@ -205,6 +206,7 @@ def _attempt_fix(
             tracing=tracing,
             rejected_attempts=rejected,
             attempt_number=attempt_num,
+            hint=config.hint,
         )
         if explored_rule and explored_rule.name not in failed_rules:
             return explored_rule, True
