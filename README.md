@@ -192,6 +192,23 @@ sequenceDiagram
 - `teardown` errors are logged but never propagated - they cannot break recovery or the consumer pipeline.
 - If no hooks are provided, recovery works exactly as before. Hooks are fully optional.
 
+### Deep Recovery
+
+The recovery loop doesn't just retry - it detects **progress**. When a rule fixes its target error but a new one appears underneath, Theow keeps the workspace changes, resets the retry budget, and continues against the new error. This chains naturally across multiple depth levels.
+
+Progress detection compares regex captures between attempts, not just match/no-match. If the same rule matches but with different captures, that's a new instance of the same pattern - the fix is kept and recovery continues. The `max_depth` parameter (default 3) caps how many error transitions are allowed, and each depth level gets a fresh retry budget.
+
+```python
+@pipeline_agent.mark(
+    context_from=lambda task, exc: {"error": str(exc)},
+    max_retries=3,     # rules to try per depth level
+    max_depth=3,       # max error transitions before giving up
+    explorable=True,
+)
+def process(task):
+    ...
+```
+
 ### Rules
 
 Rules are YAML files in `.theow/rules/` that define conditions and responses. The `when` block matches against the context dict populated by `context_from` in the [marker](#marker).
