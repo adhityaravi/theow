@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.18](https://github.com/adhityaravi/theow/compare/theow-v0.0.17...theow-v0.0.18) (2026-02-23)
+
+
+### Bug Fixes
+
+* fixes missing depth config wiring ([5a056ae](https://github.com/adhityaravi/theow/commit/5a056ae1116e4a7736993aa85ea873b834257b37))
+
 ## [0.0.17](https://github.com/adhityaravi/theow/compare/theow-v0.0.16...theow-v0.0.17) (2026-02-23)
 
 
