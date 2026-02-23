@@ -123,6 +123,7 @@ class Theow:
         self,
         context_from: Callable[..., dict[str, Any]],
         max_retries: int = 3,
+        max_depth: int = 3,
         rules: list[str] | None = None,
         tags: list[str] | None = None,
         fallback: bool = True,
@@ -137,6 +138,7 @@ class Theow:
         return self._mark_decorator(
             context_from=context_from,
             max_retries=max_retries,
+            max_depth=max_depth,
             rules=rules,
             tags=tags,
             fallback=fallback,
