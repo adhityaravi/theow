@@ -155,6 +155,142 @@ def test_truncate():
 
 
 @patch("theow._core._recover._attempt_fix")
+def test_recover_progress_detection(mock_attempt_fix):
+    """When a rule fixes its target error but reveals a new one, recovery continues."""
+    rule_a = MagicMock()
+    rule_a.name = "fix-error-a"
+    rule_a.is_ephemeral = False
+    rule_a.matches = lambda ctx: {} if "error A" in ctx.get("stderr", "") else None
+
+    rule_b = MagicMock()
+    rule_b.name = "fix-error-b"
+    rule_b.is_ephemeral = False
+    rule_b.matches = lambda ctx: {} if "error B" in ctx.get("stderr", "") else None
+
+    engine = _make_engine()
+
+    mock_attempt_fix.side_effect = [
+        (rule_a, False),
+        (rule_b, False),
+    ]
+
+    run = MagicMock(side_effect=[
+        Attempt(success=False, context={"stderr": "error A"}),  # initial
+        Attempt(success=False, context={"stderr": "error B"}),  # after rule_a → progress
+        Attempt(success=True, value="fixed"),                    # after rule_b → success
+    ])
+
+    result = recover(run, engine, RecoveryConfig(max_retries=2, max_depth=3))
+
+    assert result.success
+    assert result.value == "fixed"
+    assert mock_attempt_fix.call_count == 2
+    # Both rules recorded as success
+    engine._chroma.update_rule_stats.assert_any_call("default", "fix-error-a", True)
+    engine._chroma.update_rule_stats.assert_any_call("default", "fix-error-b", True)
+
+
+@patch("theow._core._recover._attempt_fix")
+def test_recover_progress_resets_retries(mock_attempt_fix):
+    """On progress, retry counter resets so the new error gets full budget."""
+    rule_a = MagicMock()
+    rule_a.name = "fix-error-a"
+    rule_a.is_ephemeral = False
+    rule_a.matches = lambda ctx: {} if "error A" in ctx.get("stderr", "") else None
+
+    rule_b = MagicMock()
+    rule_b.name = "fix-error-b"
+    rule_b.is_ephemeral = False
+    # rule_b matches error B (no progress on failure)
+    rule_b.matches = lambda ctx: {} if "error B" in ctx.get("stderr", "") else None
+
+    engine = _make_engine()
+
+    mock_attempt_fix.side_effect = [
+        (rule_a, False),  # depth 0
+        (rule_b, False),  # depth 1, retry 1
+        (rule_b, False),  # depth 1, retry 2 — rule_b retried after reset
+    ]
+
+    run = MagicMock(side_effect=[
+        Attempt(success=False, context={"stderr": "error A"}),  # initial
+        Attempt(success=False, context={"stderr": "error B"}),  # after rule_a → progress
+        Attempt(success=False, context={"stderr": "error B"}),  # after rule_b retry 1 → no progress
+        Attempt(success=True, value="done"),                     # after rule_b retry 2 → success
+    ])
+
+    result = recover(run, engine, RecoveryConfig(max_retries=2, max_depth=3))
+
+    assert result.success
+    assert mock_attempt_fix.call_count == 3
+
+
+@patch("theow._core._recover._attempt_fix")
+def test_recover_max_depth_exceeded(mock_attempt_fix):
+    """Recovery stops when max_depth is reached even if progress keeps happening."""
+    rules = []
+    for i in range(4):
+        rule = MagicMock()
+        rule.name = f"fix-error-{i}"
+        rule.is_ephemeral = False
+        error_text = f"error {i}"
+        rule.matches = lambda ctx, et=error_text: {} if et in ctx.get("stderr", "") else None
+        rules.append(rule)
+
+    engine = _make_engine()
+    mock_attempt_fix.side_effect = [(r, False) for r in rules]
+
+    run = MagicMock(side_effect=[
+        Attempt(success=False, context={"stderr": "error 0"}),  # initial
+        Attempt(success=False, context={"stderr": "error 1"}),  # after rule 0 → progress, depth=1
+        Attempt(success=False, context={"stderr": "error 2"}),  # after rule 1 → progress, depth=2
+    ])
+
+    result = recover(run, engine, RecoveryConfig(max_retries=3, max_depth=2))
+
+    assert not result.success
+    # Only 2 rules attempted (depth 0 and depth 1), stopped at depth=2
+    assert mock_attempt_fix.call_count == 2
+    assert run.call_count == 3  # initial + 2 retries
+
+
+@patch("theow._core._recover._attempt_fix")
+def test_recover_progress_on_changed_captures(mock_attempt_fix):
+    """Same rule matches but with different captures = progress (fixed one instance)."""
+    rule = MagicMock()
+    rule.name = "fix-mismatch"
+    rule.is_ephemeral = False
+    # Matches both errors but with different captures
+    def match_fn(ctx):
+        stderr = ctx.get("stderr", "")
+        if "module-A" in stderr:
+            return {"mod": "module-A"}
+        if "module-B" in stderr:
+            return {"mod": "module-B"}
+        return None
+    rule.matches = match_fn
+
+    engine = _make_engine()
+
+    mock_attempt_fix.side_effect = [
+        (rule, False),  # depth 0: resolve rule for module-A
+        (rule, False),  # depth 1: same rule re-resolved for module-B
+    ]
+
+    run = MagicMock(side_effect=[
+        Attempt(success=False, context={"stderr": "error: module-A mismatch"}),
+        Attempt(success=False, context={"stderr": "error: module-B mismatch"}),
+        Attempt(success=True, value="fixed"),
+    ])
+
+    result = recover(run, engine, RecoveryConfig(max_retries=3, max_depth=3))
+
+    assert result.success
+    assert result.value == "fixed"
+    engine._chroma.update_rule_stats.assert_any_call("default", "fix-mismatch", True)
+
+
+@patch("theow._core._recover._attempt_fix")
 def test_recover_breaks_on_give_up(mock_attempt_fix):
     """Recovery loop should stop immediately when LLM explicitly gives up."""
     rule = MagicMock()

@@ -159,6 +159,7 @@ def test_run_with_recovery_success_first_try():
     config = MarkConfig(
         context_from=lambda *a, **k: {},
         max_retries=3,
+        max_depth=3,
         rules=None,
         tags=None,
         fallback=True,
@@ -197,6 +198,7 @@ def test_run_with_recovery_resolve_then_success():
     config = MarkConfig(
         context_from=lambda *a, **k: {"x": "y"},
         max_retries=3,
+        max_depth=3,
         rules=None,
         tags=None,
         fallback=True,
@@ -228,6 +230,7 @@ def test_run_with_recovery_no_match_reraises():
     config = MarkConfig(
         context_from=lambda *a, **k: {"x": "y"},
         max_retries=1,
+        max_depth=3,
         rules=None,
         tags=None,
         fallback=True,
@@ -278,6 +281,7 @@ def test_run_with_recovery_explore_creates_rule(theow_dir):
     config = MarkConfig(
         context_from=lambda *a, **k: {"x": "y"},
         max_retries=3,
+        max_depth=3,
         rules=None,
         tags=None,
         fallback=True,
@@ -334,6 +338,7 @@ def test_run_with_recovery_promotes_ephemeral(theow_dir):
     config = MarkConfig(
         context_from=lambda *a, **k: {"x": "y"},
         max_retries=3,
+        max_depth=3,
         rules=None,
         tags=None,
         fallback=True,
@@ -389,6 +394,7 @@ def test_run_with_recovery_rejects_ephemeral(theow_dir):
     config = MarkConfig(
         context_from=lambda *a, **k: {"x": "y"},
         max_retries=1,
+        max_depth=3,
         rules=None,
         tags=None,
         fallback=True,
@@ -419,6 +425,7 @@ def test_run_with_recovery_theow_error():
     config = MarkConfig(
         context_from=lambda *a, **k: {"x": "y"},
         max_retries=3,
+        max_depth=3,
         rules=None,
         tags=None,
         fallback=True,
@@ -450,6 +457,7 @@ def test_attempt_recovery_context_from_fails():
     config = MarkConfig(
         context_from=bad_context_from,
         max_retries=3,
+        max_depth=3,
         rules=None,
         tags=None,
         fallback=True,
@@ -502,6 +510,49 @@ def test_execute_rule_deterministic_action_fails():
         description="R",
         when=[],
         then=[Action(action="bad")],
+    )
+    bound = rule.bind({}, {}, action_registry)
+
+    md = _make_mark_decorator()
+    assert md._execute_rule(bound) is False
+
+
+def test_execute_rule_deterministic_action_returns_error():
+    action_registry = ActionRegistry()
+
+    @action_registry.register("error_action")
+    def error_action():
+        return {"status": "error", "message": "something went wrong"}
+
+    rule = Rule(
+        name="r",
+        description="R",
+        when=[],
+        then=[Action(action="error_action")],
+    )
+    bound = rule.bind({}, {}, action_registry)
+
+    md = _make_mark_decorator()
+    assert md._execute_rule(bound) is False
+
+
+def test_execute_rule_deterministic_mixed_results():
+    """When one action succeeds and another returns error, rule fails."""
+    action_registry = ActionRegistry()
+
+    @action_registry.register("ok_action")
+    def ok_action():
+        return "ok"
+
+    @action_registry.register("bad_action")
+    def bad_action():
+        return {"status": "error", "message": "oops"}
+
+    rule = Rule(
+        name="r",
+        description="R",
+        when=[],
+        then=[Action(action="ok_action"), Action(action="bad_action")],
     )
     bound = rule.bind({}, {}, action_registry)
 
@@ -609,6 +660,7 @@ def test_recovery_hooks_lifecycle():
     config = MarkConfig(
         context_from=lambda *a, **k: {"x": "y"},
         max_retries=2,
+        max_depth=3,
         rules=None,
         tags=None,
         fallback=True,
@@ -649,6 +701,7 @@ def test_setup_failure_aborts_recovery():
     config = MarkConfig(
         context_from=lambda *a, **k: {},
         max_retries=3,
+        max_depth=3,
         rules=None,
         tags=None,
         fallback=True,
@@ -699,6 +752,7 @@ def test_teardown_failure_does_not_propagate():
     config = MarkConfig(
         context_from=lambda *a, **k: {"x": "y"},
         max_retries=1,
+        max_depth=3,
         rules=None,
         tags=None,
         fallback=True,

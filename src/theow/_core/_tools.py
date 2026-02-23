@@ -374,8 +374,22 @@ def read_file(path: str) -> str:
 
 
 def write_file(path: str, content: str) -> str:
-    """Write content to file, creating directories if needed."""
+    """Write content to file, creating directories if needed.
+
+    Do NOT use this to create rule or action files.
+    Use _write_rule for rules and _write_action for actions instead.
+    """
     p = Path(path)
+    if p.suffix == ".py" and p.parent.name == "actions":
+        return (
+            "ERROR: Cannot write action files with write_file. "
+            "Use the _write_action tool instead."
+        )
+    if ".rule.yaml" in p.name:
+        return (
+            "ERROR: Cannot write rule files with write_file. "
+            "Use the _write_rule tool instead."
+        )
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
     return f"Written {len(content)} bytes to {path}"

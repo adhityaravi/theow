@@ -184,6 +184,7 @@ class MarkConfig:
 
     context_from: Callable[..., dict[str, Any]]
     max_retries: int
+    max_depth: int
     rules: list[str] | None
     tags: list[str] | None
     fallback: bool
@@ -213,6 +214,7 @@ class MarkDecorator:
         self,
         context_from: Callable[..., dict[str, Any]],
         max_retries: int = 3,
+        max_depth: int = 3,
         rules: list[str] | None = None,
         tags: list[str] | None = None,
         fallback: bool = True,
@@ -225,6 +227,7 @@ class MarkDecorator:
         config = MarkConfig(
             context_from=context_from,
             max_retries=max_retries,
+            max_depth=max_depth,
             rules=rules,
             tags=tags,
             fallback=fallback,
@@ -277,6 +280,7 @@ class MarkDecorator:
 
         recovery_config = RecoveryConfig(
             max_retries=config.max_retries,
+            max_depth=config.max_depth,
             rules=config.rules,
             tags=config.tags,
             collection=config.collection,
@@ -360,7 +364,13 @@ class MarkDecorator:
             if rule.type == "probabilistic":
                 return self._execute_probabilistic_rule(rule, context or {})
             else:
-                rule.act()
+                results = rule.act()
+                if any(
+                    isinstance(r, dict) and r.get("status") == "error"
+                    for r in results
+                ):
+                    logger.warning("Action returned error", rule=rule.name)
+                    return False
                 return True
         except Exception as err:
             logger.warning("Action failed", rule=rule.name, error=str(err))

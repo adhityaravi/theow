@@ -27,6 +27,7 @@ class ProfileConfig(BaseModel):
     rules: list[str] | None = None
     collection: str = "default"
     max_retries: int = 3
+    max_depth: int = 3
     explore: bool = False
     fallback: bool = True
     plugin: str | None = None

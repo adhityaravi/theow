@@ -90,6 +90,7 @@ def run(
 
     recovery_config = RecoveryConfig(
         max_retries=prof.max_retries,
+        max_depth=prof.max_depth,
         rules=prof.rules,
         tags=prof.tags,
         collection=prof.collection,

@@ -34,12 +34,184 @@ class RecoveryConfig:
     """Configuration for a recovery session."""
 
     max_retries: int = 3
+    max_depth: int = 3
     rules: list[str] | None = None
     tags: list[str] | None = None
     collection: str = "default"
     fallback: bool = True
     explorable: bool = False
     hint: str | None = None
+
+
+class _RecoveryLoop:
+    """Encapsulates mutable state and side effects for the recovery loop."""
+
+    def __init__(
+        self,
+        engine: Theow,
+        config: RecoveryConfig,
+        before_attempt: Callable[[dict[str, Any], int], dict[str, Any] | None] | None,
+        after_attempt: Callable[[dict[str, Any], int, bool], None] | None,
+    ) -> None:
+        self._engine = engine
+        self._config = config
+        self._before = before_attempt
+        self._after = after_attempt
+
+        self._hook_state: dict[str, Any] = {}
+        self._failed_rules: list[str] = []
+        self._rejected: list[dict[str, Any]] = []
+        self._depth = 0
+        self._retry = 0
+        self._attempt_num = 0
+        self._explored = False
+        self.abort = False
+
+    @property
+    def max_iterations(self) -> int:
+        extra = self._config.max_depth if self._config.explorable else 0
+        return self._config.max_retries * self._config.max_depth + extra
+
+    def has_budget(self) -> bool:
+        # Guarantee at least one explore attempt when explore is enabled.
+        if (
+            self._config.explorable
+            and not self._explored
+            and self._retry >= self._config.max_retries
+        ):
+            return True
+        return self._retry < self._config.max_retries
+
+    def setup(self) -> bool:
+        """Increment counters and run before_attempt hook. False = abort."""
+        self._retry += 1
+        self._attempt_num += 1
+        if not self._before:
+            return True
+        try:
+            self._hook_state = self._before(self._hook_state, self._attempt_num) or self._hook_state
+            return True
+        except Exception as err:
+            logger.error("Setup hook failed", error=str(err))
+            return False
+
+    def find_rule(
+        self, context: dict[str, Any], tracing: TracingInfo | None,
+    ) -> tuple[Rule | None, bool]:
+        return _attempt_fix(
+            context, self._engine, self._config,
+            self._failed_rules, self._rejected,
+            self._attempt_num, tracing,
+        )
+
+    def teardown_no_rule(self) -> None:
+        _teardown_failure(
+            self._engine, self._hook_state, self._after,
+            self._attempt_num, rule_name="explore",
+        )
+
+    def replay_explored_rule(self, rule: Rule, context: dict[str, Any]) -> bool:
+        """Reset workspace after exploration, replay rule on clean state.
+
+        Returns True if rule executed successfully (caller should verify).
+        Returns False with self.abort=True to break, or False to continue.
+        """
+        _teardown_failure(
+            self._engine, self._hook_state, self._after,
+            self._attempt_num, rule_name=rule.name,
+        )
+        if self._before:
+            try:
+                self._hook_state = self._before(self._hook_state, self._attempt_num) or self._hook_state
+            except Exception as err:
+                logger.error("Setup hook failed after explore reset", error=str(err))
+                self.abort = True
+                return False
+
+        if self._engine.execute_rule(rule, context):
+            return True
+
+        self._engine._chroma.update_rule_stats(self._config.collection, rule.name, False)
+        gave_up = self._engine._explorer._last_give_up_reason
+        _teardown_failure(
+            self._engine, self._hook_state, self._after,
+            self._attempt_num, rule_name=rule.name,
+        )
+        self._mark_failed(rule, context)
+        if gave_up:
+            self.abort = True
+        return False
+
+    def on_success(self, rule: Rule) -> None:
+        """Handle successful verification: teardown hooks + promote."""
+        done_msg = self._engine._explorer._last_done_message
+        self._engine._explorer._last_done_message = None  # consume
+        if self._engine._archive_llm_attempt and done_msg:
+            self._hook_state["_observation"] = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "outcome": "success",
+                "rule": rule.name,
+                "reason": done_msg,
+            }
+        _call_after(self._after, self._hook_state, self._attempt_num, True)
+        _flush_observation(self._engine, self._hook_state)
+        self._engine._chroma.update_rule_stats(self._config.collection, rule.name, True)
+        if rule.is_ephemeral:
+            _promote_rule(rule, self._engine)
+
+    def on_progress(self, rule: Rule) -> bool:
+        """Rule fixed its issue but a new error appeared.
+
+        Returns True if recovery can continue at the next depth level.
+        """
+        logger.info("Recovery progress", rule=rule.name, depth=self._depth)
+        self._engine._chroma.update_rule_stats(self._config.collection, rule.name, True)
+        if rule.is_ephemeral:
+            _promote_rule(rule, self._engine)
+        _call_after(self._after, self._hook_state, self._attempt_num, True)
+        _flush_observation(self._engine, self._hook_state)
+        self._failed_rules.clear()
+        self._rejected.clear()
+        self._hook_state = {}
+        self._depth += 1
+        self._retry = 0
+        self._explored = False
+        if self._depth >= self._config.max_depth:
+            logger.warning("Max recovery depth reached", depth=self._depth)
+            return False
+        return True
+
+    def execute_rule(self, rule: Rule, context: dict[str, Any]) -> bool:
+        """Execute a resolved rule's action. Returns True if action succeeded."""
+        return self._engine.execute_rule(rule, context)
+
+    def on_action_failed(self, rule: Rule, context: dict[str, Any]) -> None:
+        """Handle action execution failure: teardown + mark as failed."""
+        self._engine._chroma.update_rule_stats(self._config.collection, rule.name, False)
+        _teardown_failure(
+            self._engine, self._hook_state, self._after,
+            self._attempt_num, rule_name=rule.name,
+        )
+        self._mark_failed(rule, context)
+
+    def on_failure(self, rule: Rule, context: dict[str, Any]) -> None:
+        """Handle failed verification: teardown + mark rule as failed."""
+        _teardown_failure(
+            self._engine, self._hook_state, self._after,
+            self._attempt_num, rule_name=rule.name,
+        )
+        self._engine._chroma.update_rule_stats(self._config.collection, rule.name, False)
+        self._mark_failed(rule, context)
+
+    def cleanup(self) -> None:
+        _cleanup(self._engine, self._rejected)
+
+    def _mark_failed(self, rule: Rule, context: dict[str, Any]) -> None:
+        self._failed_rules.append(rule.name)
+        if rule.is_ephemeral:
+            self._rejected.append(_reject_info(rule, context))
+            if self._engine._explorer._session_cache:
+                self._engine._explorer._session_cache.invalidate(rule.name)
 
 
 def recover(
@@ -51,21 +223,11 @@ def recover(
 ) -> Attempt[T]:
     """Run target with automatic recovery.
 
-    Steps:
-        1. Try run(), return if succeeds (no hooks on initial attempt)
-        2. For each retry:
-           a. before_attempt - lifecycle hook before recovery
-           b. _attempt_fix - find rule via resolve or explore
-           c. If exploration ran: after_attempt(False) + before_attempt to
-              reset the workspace, then execute rule action on clean state
-           d. run() again to verify if fix worked
-           e. after_attempt - lifecycle hook after recovery
-           f. If success: promote ephemeral rule, return
-           g. If failure: reject ephemeral rule, update context
-        3. _cleanup - clean up ephemeral files after all retries exhausted
-
-    Theow never blocks the consumer pipeline. If recovery fails or theow
-    itself errors, the last attempt is returned as-is.
+    The loop has two counters: ``retry`` resets on progress, ``depth``
+    increments.  Progress is detected when the applied rule no longer
+    matches the new context (its target error is gone, a different one
+    appeared).  On progress the workspace changes are kept and recovery
+    continues against the new error up to ``max_depth`` times.
 
     Args:
         run: Callable that executes the target and returns an Attempt.
@@ -82,92 +244,51 @@ def recover(
         return attempt
 
     logger.info("Failure captured", error=_truncate(attempt.context.get("stderr", "")))
-
-    hook_state: dict[str, Any] = {}
-    failed_rules: list[str] = []
-    rejected: list[dict[str, Any]] = []
+    loop = _RecoveryLoop(engine, config, before_attempt, after_attempt)
 
     try:
-        for attempt_num in range(1, config.max_retries + 1):
-            if before_attempt:
-                try:
-                    hook_state = before_attempt(hook_state, attempt_num) or hook_state
-                except Exception as hook_err:
-                    logger.error("Setup hook failed", error=str(hook_err))
-                    break
+        for _ in range(loop.max_iterations):
+            if not loop.has_budget():
+                break
+            if not loop.setup():
+                break
 
-            rule, explored = _attempt_fix(
-                attempt.context,
-                engine,
-                config,
-                failed_rules,
-                rejected,
-                attempt_num,
-                attempt.tracing,
-            )
-
+            rule, explored = loop.find_rule(attempt.context, attempt.tracing)
             if rule is None:
-                _teardown_failure(engine, hook_state, after_attempt, attempt_num, rule_name="explore")
+                loop.teardown_no_rule()
                 break
 
             if explored:
-                # LLM exploration dirtied the workspace. Reset via the
-                # existing hooks so the rule action runs on a clean baseline.
-                _teardown_failure(engine, hook_state, after_attempt, attempt_num, rule_name=rule.name)
-                if before_attempt:
-                    try:
-                        hook_state = before_attempt(hook_state, attempt_num) or hook_state
-                    except Exception as hook_err:
-                        logger.error("Setup hook failed after explore reset", error=str(hook_err))
-                        break
-                if not engine.execute_rule(rule, attempt.context):
-                    engine._chroma.update_rule_stats(config.collection, rule.name, False)
-                    gave_up = engine._explorer._last_give_up_reason
-                    _teardown_failure(engine, hook_state, after_attempt, attempt_num, rule_name=rule.name)
-                    failed_rules.append(rule.name)
-                    if rule.is_ephemeral:
-                        rejected.append(_reject_info(rule, attempt.context))
-                        if engine._explorer._session_cache:
-                            engine._explorer._session_cache.invalidate(rule.name)
-                    # If LLM explicitly gave up, don't waste budget on more attempts
-                    if gave_up:
+                loop._explored = True
+                if not loop.replay_explored_rule(rule, attempt.context):
+                    if loop.abort:
                         break
                     continue
+            else:
+                if not loop.execute_rule(rule, attempt.context):
+                    loop.on_action_failed(rule, attempt.context)
+                    continue
 
+            prev_captures = rule.matches(attempt.context)
             attempt = run()
 
             if attempt.success:
-                done_msg = engine._explorer._last_done_message
-                engine._explorer._last_done_message = None  # consume
-                if engine._archive_llm_attempt and done_msg:
-                    hook_state["_observation"] = {
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "outcome": "success",
-                        "rule": rule.name,
-                        "reason": done_msg,
-                    }
-                _call_after(after_attempt, hook_state, attempt_num, True)
-                _flush_observation(engine, hook_state)
-            else:
-                _teardown_failure(engine, hook_state, after_attempt, attempt_num, rule_name=rule.name)
-
-            if attempt.success:
-                engine._chroma.update_rule_stats(config.collection, rule.name, True)
-                if rule.is_ephemeral:
-                    _promote_rule(rule, engine)
+                loop.on_success(rule)
                 return attempt
 
-            # Rule action ran but function still failed; don't retry this rule.
-            engine._chroma.update_rule_stats(config.collection, rule.name, False)
-            failed_rules.append(rule.name)
-            if rule.is_ephemeral:
-                rejected.append(_reject_info(rule, attempt.context))
-                if engine._explorer._session_cache:
-                    engine._explorer._session_cache.invalidate(rule.name)
+            # Progress: rule no longer matches, or matches with different
+            # captures (fixed one instance, another instance of same pattern).
+            new_captures = rule.matches(attempt.context)
+            if new_captures is None or new_captures != prev_captures:
+                if not loop.on_progress(rule):
+                    break
+                continue
+
+            loop.on_failure(rule, attempt.context)
     except Exception as internal_err:
         logger.error(f"{get_engine_name()} internal error", error=str(internal_err))
 
-    _cleanup(engine, rejected)
+    loop.cleanup()
     return attempt
 
 
@@ -180,7 +301,7 @@ def _attempt_fix(
     attempt_num: int,
     tracing: TracingInfo | None,
 ) -> tuple[Rule | None, bool]:
-    """Find and execute a recovery rule.
+    """Find a recovery rule via resolve or explore.  Does NOT execute.
 
     Returns:
         (rule, explored) where explored=True if LLM exploration ran.
@@ -194,12 +315,8 @@ def _attempt_fix(
         n_results=config.max_retries,
         exclude_rules=failed_rules,
     )
-
     if rule:
-        if engine.execute_rule(rule, context):
-            return rule, False
-        engine._chroma.update_rule_stats(config.collection, rule.name, False)
-        failed_rules.append(rule.name)
+        return rule, False
 
     if config.explorable and os.environ.get("THEOW_EXPLORE") == "1":
         tools = engine.get_tools()
@@ -211,8 +328,9 @@ def _attempt_fix(
             rejected_attempts=rejected,
             attempt_number=attempt_num,
             hint=config.hint,
+            exclude_rules=failed_rules,
         )
-        if explored_rule and explored_rule.name not in failed_rules:
+        if explored_rule:
             return explored_rule, True
         if not explored:
             return None, False

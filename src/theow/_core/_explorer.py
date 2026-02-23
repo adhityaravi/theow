@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -95,6 +96,7 @@ class Explorer:
         rejected_attempts: list[dict[str, Any]] | None = None,
         attempt_number: int = 1,
         hint: str | None = None,
+        exclude_rules: list[str] | None = None,
     ) -> tuple[Rule | None, bool]:
         """Explore a novel situation using LLM.
 
@@ -123,18 +125,46 @@ class Explorer:
             return cached, False
 
         chroma_match = self._check_chroma(context, collection)
-        if chroma_match:
+        if chroma_match and chroma_match.name not in (exclude_rules or []):
             return chroma_match, False
 
         self._session_count += 1
 
-        rule, explored = self._run_conversation(
-            context, tools, collection, tracing, rejected_attempts, attempt_number, hint
-        )
+        locked = self._lock_permanent_files()
+        try:
+            rule, explored = self._run_conversation(
+                context, tools, collection, tracing, rejected_attempts, attempt_number, hint
+            )
+        finally:
+            self._unlock_permanent_files(locked)
+
         if rule:
             self._session_cache.store(context, rule)
 
         return rule, explored
+
+    def _lock_permanent_files(self) -> dict[Path, int]:
+        """Make permanent rule/action files read-only during exploration."""
+        original_modes: dict[Path, int] = {}
+        actions_dir = self._rules_dir.parent / "actions"
+        for path in self._rules_dir.rglob("*.rule.yaml"):
+            if "ephemeral" not in path.parts:
+                original_modes[path] = path.stat().st_mode
+                path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        if actions_dir.exists():
+            for path in actions_dir.rglob("*.py"):
+                original_modes[path] = path.stat().st_mode
+                path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        return original_modes
+
+    def _unlock_permanent_files(self, original_modes: dict[Path, int]) -> None:
+        """Restore original permissions after exploration."""
+        for path, mode in original_modes.items():
+            try:
+                if path.exists():
+                    path.chmod(mode)
+            except Exception as e:
+                logger.warning("Failed to restore file permissions", path=str(path), error=str(e))
 
     def _check_chroma(self, context: dict[str, Any], collection: str) -> Rule | None:
         query_text = self._extract_query_text(context)
@@ -197,7 +227,7 @@ class Explorer:
             initial_prompt += f"\n\n## Caller Constraints\n\n{hint}"
         messages = [{"role": "user", "content": initial_prompt}]
 
-        logger.debug(
+        logger.info(
             "Starting LLM conversation",
             session=f"{self._session_count}/{self._session_limit}",
             prompt_tokens_est=len(initial_prompt) // 4,
@@ -355,6 +385,17 @@ Try a different approach."""
         Actual validation happens when decorator runs fn() after action.
         """
         rule_path = Path(rule_file)
+
+        ephemeral_dir = self._rules_dir / "ephemeral"
+        try:
+            rule_path.resolve().relative_to(ephemeral_dir.resolve())
+        except ValueError:
+            logger.error(
+                "Submitted rule must be in ephemeral directory",
+                path=rule_file,
+                expected=str(ephemeral_dir),
+            )
+            return None
 
         if not rule_path.exists():
             logger.error("Rule file not found", path=rule_file)

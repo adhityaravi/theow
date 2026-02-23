@@ -26,6 +26,14 @@ multiple files.
 
 Always use absolute paths when reading/writing files.
 
+## IMPORTANT: Rules and Actions are Read-Only
+
+NEVER modify or overwrite existing rule (`.rule.yaml`) or action (`.py`) files
+directly. They are vetted and permanent. To create new rules and actions, you MUST
+use the `_write_rule()` and `_write_action()` tools, which write to a safe ephemeral
+directory. Do NOT use `write_file`, `run_command`, or any other tool to edit files
+in the rules or actions directories.
+
 ## Workflow
 
 1. **Check for prior work** - Use `_list_ephemeral_rules()` to check for rules from

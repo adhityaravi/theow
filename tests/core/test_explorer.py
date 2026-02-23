@@ -255,8 +255,10 @@ def test_handle_signal_submit_rule(theow_dir):
 
 def test_validate_rule_no_match(theow_dir):
     rules_dir = theow_dir / "rules"
+    ephemeral_dir = rules_dir / "ephemeral"
+    ephemeral_dir.mkdir(parents=True, exist_ok=True)
     rule = Rule(name="r", description="R", when=[Fact(fact="x", equals="y")])
-    path = rules_dir / "r.rule.yaml"
+    path = ephemeral_dir / "r.rule.yaml"
     rule.to_yaml(path)
     explorer = _make_explorer(rules_dir=rules_dir)
     result = explorer._validate_rule(str(path), None, {"x": "z"}, "default")
@@ -265,6 +267,8 @@ def test_validate_rule_no_match(theow_dir):
 
 def test_validate_rule_action_missing(theow_dir):
     rules_dir = theow_dir / "rules"
+    ephemeral_dir = rules_dir / "ephemeral"
+    ephemeral_dir.mkdir(parents=True, exist_ok=True)
     action_registry = ActionRegistry()
 
     rule = Rule(
@@ -273,7 +277,7 @@ def test_validate_rule_action_missing(theow_dir):
         when=[Fact(fact="x", equals="y")],
         then=[Action(action="nonexistent_action")],
     )
-    path = rules_dir / "r.rule.yaml"
+    path = ephemeral_dir / "r.rule.yaml"
     rule.to_yaml(path)
 
     chroma = MagicMock()
@@ -305,13 +309,15 @@ def test_validate_rule_conflict(theow_dir):
     existing.to_yaml(rules_dir / "existing.rule.yaml")
 
     # New rule with same when, different then
+    ephemeral_dir = rules_dir / "ephemeral"
+    ephemeral_dir.mkdir(parents=True, exist_ok=True)
     new_rule = Rule(
         name="new",
         description="New",
         when=[Fact(fact="x", equals="y")],
         then=[Action(action="fix_b")],
     )
-    path = rules_dir / "new.rule.yaml"
+    path = ephemeral_dir / "new.rule.yaml"
     new_rule.to_yaml(path)
 
     chroma = MagicMock()
@@ -366,7 +372,9 @@ def test_validate_rule_with_action_file(theow_dir):
         when=[Fact(fact="x", equals="y")],
         then=[Action(action="new_action")],
     )
-    path = rules_dir / "r.rule.yaml"
+    ephemeral_dir = rules_dir / "ephemeral"
+    ephemeral_dir.mkdir(parents=True, exist_ok=True)
+    path = ephemeral_dir / "r.rule.yaml"
     rule.to_yaml(path)
 
     # Write a real action file that registers via @action
