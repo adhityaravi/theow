@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.17](https://github.com/adhityaravi/theow/compare/theow-v0.0.16...theow-v0.0.17) (2026-02-23)
+
+
+### Features
+
+* adds multi-model routing using the secondary llm ([63d0096](https://github.com/adhityaravi/theow/commit/63d00968f62236b8007e53a14984885057224eb1))
+
 ## [0.0.16](https://github.com/adhityaravi/theow/compare/theow-v0.0.15...theow-v0.0.16) (2026-02-23)
 
 
