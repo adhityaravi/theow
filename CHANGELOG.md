@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.16](https://github.com/adhityaravi/theow/compare/theow-v0.0.15...theow-v0.0.16) (2026-02-23)
+
+
+### Features
+
+* chained recovery logic to attempt recovery on multiple depths ([358e6a1](https://github.com/adhityaravi/theow/commit/358e6a1480fdabb105f8f7036abb82a48b16f9e9))
+
 ## [0.0.15](https://github.com/adhityaravi/theow/compare/theow-v0.0.14...theow-v0.0.15) (2026-02-22)
 
 
