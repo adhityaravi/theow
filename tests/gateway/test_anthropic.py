@@ -16,6 +16,7 @@ def test_anthropic_gateway_requires_api_key():
 
 
 def test_anthropic_gateway_conversation_no_tool_use():
+    """Text-only replies trigger nudges before giving up."""
     with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
         with patch("theow._gateway._anthropic.anthropic") as mock_anthropic:
             from theow._gateway._anthropic import AnthropicGateway
@@ -36,8 +37,10 @@ def test_anthropic_gateway_conversation_no_tool_use():
                 budget={"max_tool_calls_per_session": 5},
             )
 
-            assert result.tokens_used == 15
+            # 1 original + 2 nudge retries = 3 calls, each 15 tokens
+            assert result.tokens_used == 45
             assert result.tool_calls == 0
+            assert mock_client.messages.create.call_count == 3
 
 
 def test_anthropic_conversation_with_tool_use():
@@ -67,7 +70,13 @@ def test_anthropic_conversation_with_tool_use():
             mock_resp2.usage.input_tokens = 30
             mock_resp2.usage.output_tokens = 5
 
-            mock_client.messages.create.side_effect = [mock_resp1, mock_resp2]
+            # tool call, then text reply + 2 nudge retries (all text)
+            mock_client.messages.create.side_effect = [
+                mock_resp1,
+                mock_resp2,
+                mock_resp2,
+                mock_resp2,
+            ]
 
             def read_file(path: str) -> str:
                 """Read a file."""
@@ -82,7 +91,8 @@ def test_anthropic_conversation_with_tool_use():
             )
 
             assert result.tool_calls == 1
-            assert result.tokens_used == 65
+            # 1 tool resp (30 tokens) + 3 text responses (35 tokens each)
+            assert result.tokens_used == 30 + 35 * 3
 
 
 def test_anthropic_conversation_signal_during_tool():
@@ -142,7 +152,8 @@ def test_anthropic_conversation_budget_warning():
             text_resp.usage.input_tokens = 5
             text_resp.usage.output_tokens = 5
 
-            responses = [make_tool_response() for _ in range(4)] + [text_resp]
+            # 4 tool calls, then text reply + 2 nudge retries (all text)
+            responses = [make_tool_response() for _ in range(4)] + [text_resp] * 3
             mock_client.messages.create.side_effect = responses
 
             def noop() -> str:

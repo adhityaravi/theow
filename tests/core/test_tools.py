@@ -4,13 +4,16 @@ import pytest
 
 from theow._core._tools import (
     Done,
+    Escalate,
     GiveUp,
     RequestTemplates,
     SubmitRule,
     _done,
+    _escalate,
     _give_up,
     _request_templates,
     _submit_rule,
+    make_direct_fix_tools,
     make_ephemeral_tools,
     make_search_tools,
     make_validation_tools,
@@ -288,3 +291,25 @@ def test_list_directory(tmp_path):
     items = list_directory(str(tmp_path))
     assert "a.txt" in items
     assert "b.txt" in items
+
+
+def test_escalate_signal():
+    sig = Escalate("found something")
+    assert sig.findings == "found something"
+
+
+def test_escalate_raises():
+    with pytest.raises(Escalate):
+        _escalate("my findings")
+
+
+def test_make_direct_fix_tools_without_escalation():
+    tools = make_direct_fix_tools()
+    names = [t.__name__ for t in tools]
+    assert "_escalate" not in names
+
+
+def test_make_direct_fix_tools_with_escalation():
+    tools = make_direct_fix_tools(allow_escalation=True)
+    names = [t.__name__ for t in tools]
+    assert "_escalate" in names

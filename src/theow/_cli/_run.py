@@ -25,6 +25,7 @@ def run(
     tail: int | None = None,
     plugin: str | None = None,
     hint: str | None = None,
+    escalate: bool = False,
     quiet: bool = False,
 ) -> int:
     """Execute a command with theow recovery. Returns exit code."""
@@ -38,6 +39,8 @@ def run(
         cli_overrides["plugin"] = plugin
     if hint:
         cli_overrides["hint"] = hint
+    if escalate:
+        cli_overrides["allow_escalation"] = True
 
     prof = resolve_profile(config, profile, cli_overrides)
 
@@ -97,6 +100,7 @@ def run(
         fallback=prof.fallback,
         explorable=prof.explore,
         hint=prof.hint,
+        allow_escalation=prof.allow_escalation,
     )
 
     attempt = recover(

@@ -16,7 +16,13 @@ from google.genai import types
 
 from theow._core._logging import get_engine_name, get_logger
 from theow._core._tools import ExplorationSignal
-from theow._gateway._base import ConversationResult, LLMGateway, SessionState
+from theow._gateway._base import (
+    MAX_TEXT_NUDGES,
+    TEXT_REPLY_NUDGE,
+    ConversationResult,
+    LLMGateway,
+    SessionState,
+)
 
 logger = get_logger(__name__)
 
@@ -51,6 +57,7 @@ class GeminiGateway(LLMGateway):
         Raises ExplorationSignal subclasses when LLM calls signal tools.
         """
         max_calls, max_tokens = self._extract_budget(budget)
+        allow_escalation = budget.get("allow_escalation", False)
         tool_map = self._build_tool_map(tools)
 
         # Build config
@@ -65,6 +72,7 @@ class GeminiGateway(LLMGateway):
 
         config = types.GenerateContentConfig(**config_kwargs)
         state = SessionState()
+        text_nudges = 0
 
         # Initialize or continue history
         self._init_history(messages)
@@ -92,6 +100,15 @@ class GeminiGateway(LLMGateway):
             # Check for function calls
             tool_calls = self._extract_tool_calls(response)
             if not tool_calls:
+                if text_nudges < MAX_TEXT_NUDGES:
+                    text_nudges += 1
+                    logger.debug("Text-only reply, nudging LLM", nudge=text_nudges)
+                    self._history.append(
+                        types.Content(
+                            role="user", parts=[types.Part.from_text(text=TEXT_REPLY_NUDGE)]
+                        )
+                    )
+                    continue
                 break
 
             # Execute tools and add tool response to history
@@ -99,7 +116,7 @@ class GeminiGateway(LLMGateway):
             self._history.append(tool_content)
 
             # Check for budget warning after tool execution
-            warning = self.check_budget_warning(state, max_calls, max_tokens)
+            warning = self.check_budget_warning(state, max_calls, max_tokens, allow_escalation)
             if warning:
                 self._history.append(
                     types.Content(role="user", parts=[types.Part.from_text(text=warning)])

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
 
 from theow._core._decorators import TracingInfo
 from theow._core._logging import get_engine_name, get_logger
+from theow._core._models import LLMRecord
 
 if TYPE_CHECKING:
     from theow._core._engine import Theow
@@ -41,6 +41,7 @@ class RecoveryConfig:
     fallback: bool = True
     explorable: bool = False
     hint: str | None = None
+    allow_escalation: bool = False
 
 
 class _RecoveryLoop:
@@ -96,18 +97,27 @@ class _RecoveryLoop:
             return False
 
     def find_rule(
-        self, context: dict[str, Any], tracing: TracingInfo | None,
+        self,
+        context: dict[str, Any],
+        tracing: TracingInfo | None,
     ) -> tuple[Rule | None, bool]:
         return _attempt_fix(
-            context, self._engine, self._config,
-            self._failed_rules, self._rejected,
-            self._attempt_num, tracing,
+            context,
+            self._engine,
+            self._config,
+            self._failed_rules,
+            self._rejected,
+            self._attempt_num,
+            tracing,
         )
 
     def teardown_no_rule(self) -> None:
         _teardown_failure(
-            self._engine, self._hook_state, self._after,
-            self._attempt_num, rule_name="explore",
+            self._engine,
+            self._hook_state,
+            self._after,
+            self._attempt_num,
+            rule_name="explore",
         )
 
     def replay_explored_rule(self, rule: Rule, context: dict[str, Any]) -> bool:
@@ -117,12 +127,17 @@ class _RecoveryLoop:
         Returns False with self.abort=True to break, or False to continue.
         """
         _teardown_failure(
-            self._engine, self._hook_state, self._after,
-            self._attempt_num, rule_name=rule.name,
+            self._engine,
+            self._hook_state,
+            self._after,
+            self._attempt_num,
+            rule_name=rule.name,
         )
         if self._before:
             try:
-                self._hook_state = self._before(self._hook_state, self._attempt_num) or self._hook_state
+                self._hook_state = (
+                    self._before(self._hook_state, self._attempt_num) or self._hook_state
+                )
             except Exception as err:
                 logger.error("Setup hook failed after explore reset", error=str(err))
                 self.abort = True
@@ -134,8 +149,11 @@ class _RecoveryLoop:
         self._engine._chroma.update_rule_stats(self._config.collection, rule.name, False)
         gave_up = self._engine._explorer._last_give_up_reason
         _teardown_failure(
-            self._engine, self._hook_state, self._after,
-            self._attempt_num, rule_name=rule.name,
+            self._engine,
+            self._hook_state,
+            self._after,
+            self._attempt_num,
+            rule_name=rule.name,
         )
         self._mark_failed(rule, context)
         if gave_up:
@@ -147,12 +165,11 @@ class _RecoveryLoop:
         done_msg = self._engine._explorer._last_done_message
         self._engine._explorer._last_done_message = None  # consume
         if self._engine._archive_llm_attempt and done_msg:
-            self._hook_state["_observation"] = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "outcome": "success",
-                "rule": rule.name,
-                "reason": done_msg,
-            }
+            self._hook_state["_observation"] = LLMRecord(
+                outcome="success",
+                rule=rule.name,
+                reason=done_msg,
+            )
         _call_after(self._after, self._hook_state, self._attempt_num, True)
         _flush_observation(self._engine, self._hook_state)
         self._engine._chroma.update_rule_stats(self._config.collection, rule.name, True)
@@ -189,19 +206,57 @@ class _RecoveryLoop:
         """Handle action execution failure: teardown + mark as failed."""
         self._engine._chroma.update_rule_stats(self._config.collection, rule.name, False)
         _teardown_failure(
-            self._engine, self._hook_state, self._after,
-            self._attempt_num, rule_name=rule.name,
+            self._engine,
+            self._hook_state,
+            self._after,
+            self._attempt_num,
+            rule_name=rule.name,
         )
         self._mark_failed(rule, context)
 
     def on_failure(self, rule: Rule, context: dict[str, Any]) -> None:
         """Handle failed verification: teardown + mark rule as failed."""
+        # If LLM claimed success but verification failed, record as unverified
+        done_msg = self._engine._explorer._last_done_message
+        self._engine._explorer._last_done_message = None  # consume
+        if self._engine._archive_llm_attempt and done_msg:
+            self._hook_state["_observation"] = LLMRecord(
+                outcome="unverified",
+                rule=rule.name,
+                reason=done_msg,
+            )
         _teardown_failure(
-            self._engine, self._hook_state, self._after,
-            self._attempt_num, rule_name=rule.name,
+            self._engine,
+            self._hook_state,
+            self._after,
+            self._attempt_num,
+            rule_name=rule.name,
         )
         self._engine._chroma.update_rule_stats(self._config.collection, rule.name, False)
         self._mark_failed(rule, context)
+
+    def try_escalate_unverified(self, rule: Rule, context: dict[str, Any]) -> bool:
+        """Try escalating to secondary after primary claimed done but verification failed.
+
+        Returns True if escalation was attempted (caller should re-run and verify).
+        """
+        done_msg = self._engine._explorer._last_done_message
+        if not done_msg:
+            return False
+        if not self._config.allow_escalation:
+            return False
+        if self._engine._explorer._secondary_gateway is None:
+            return False
+
+        # Consume the done message so it's not reused
+        self._engine._explorer._last_done_message = None
+
+        error_text = context.get("stderr", context.get("error", ""))
+        findings = (
+            f"The previous model claimed fix: {done_msg}. "
+            f"Verification failed with: {str(error_text)[:500]}"
+        )
+        return self._engine.execute_rule(rule, context, escalation_context=findings)
 
     def cleanup(self) -> None:
         _cleanup(self._engine, self._rejected)
@@ -284,6 +339,13 @@ def recover(
                     break
                 continue
 
+            # Try escalating to secondary before giving up on this attempt
+            if loop.try_escalate_unverified(rule, attempt.context):
+                attempt = run()
+                if attempt.success:
+                    loop.on_success(rule)
+                    return attempt
+
             loop.on_failure(rule, attempt.context)
     except Exception as internal_err:
         logger.error(f"{get_engine_name()} internal error", error=str(internal_err))
@@ -329,6 +391,7 @@ def _attempt_fix(
             attempt_number=attempt_num,
             hint=config.hint,
             exclude_rules=failed_rules,
+            allow_escalation=config.allow_escalation,
         )
         if explored_rule:
             return explored_rule, True
@@ -380,28 +443,29 @@ def _cleanup(engine: Theow, rejected: list[dict[str, Any]]) -> None:
         logger.error("Cleanup failed", error=str(cleanup_err))
 
 
-def _sync_give_up_reason(engine: Theow, hook_state: dict[str, Any], rule_name: str | None = None) -> None:
+def _sync_give_up_reason(
+    engine: Theow, hook_state: dict[str, Any], rule_name: str | None = None
+) -> None:
     """Copy the explorer's give-up reason (if any) into hook_state."""
     reason = engine._explorer._last_give_up_reason
     engine._explorer._last_give_up_reason = None  # consume
     if reason:
         hook_state["_give_up_reason"] = reason
         if engine._archive_llm_attempt:
-            hook_state["_observation"] = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "outcome": "failure",
-                "rule": rule_name or "explore",
-                "reason": reason,
-            }
+            hook_state["_observation"] = LLMRecord(
+                outcome="failure",
+                rule=rule_name or "explore",
+                reason=reason,
+            )
 
 
 def _flush_observation(engine: Theow, hook_state: dict[str, Any]) -> None:
     """Pop and persist any pending observation from hook_state."""
     if not engine._archive_llm_attempt:
         return
-    obs = hook_state.pop("_observation", None)
+    obs: LLMRecord | None = hook_state.pop("_observation", None)
     if obs:
-        engine._flush_observation(obs)
+        engine._flush_observation(obs.to_dict())
 
 
 def _teardown_failure(

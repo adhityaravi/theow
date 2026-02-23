@@ -43,6 +43,14 @@ class SubmitRule(ExplorationSignal):
         super().__init__(f"Submitted: {rule_file}")
 
 
+class Escalate(ExplorationSignal):
+    """LLM requests escalation to a more capable model."""
+
+    def __init__(self, findings: str) -> None:
+        self.findings = findings
+        super().__init__(f"Escalate: {findings}")
+
+
 class Done(ExplorationSignal):
     """LLM finished direct fix, ready for retry."""
 
@@ -53,7 +61,14 @@ class Done(ExplorationSignal):
 
 # Signal tool functions (module-level for reuse)
 def _give_up(reason: str = "") -> None:
-    """Signal that this problem cannot or should not be automated.
+    """Signal that this problem is fundamentally unautomatable.
+
+    Only use this when you have a clear, specific reason why NO agent could
+    solve this — e.g. requires human judgment, missing credentials, or the
+    problem is outside the scope of automation entirely.
+
+    If you're unsure or simply stuck, use `_escalate()` instead to hand off
+    your findings to a senior model that may succeed where you couldn't.
 
     Args:
         reason: Clear explanation of why automation was declined. Omit when
@@ -96,15 +111,38 @@ def _done(message: str = "") -> None:
     raise Done(message)
 
 
+def _escalate(findings: str) -> None:
+    """Escalate to a senior model when you are stuck but the problem looks solvable.
+
+    Use this when you've investigated the problem, have partial findings or
+    hypotheses, but cannot complete the fix yourself. A more capable model
+    will receive your findings and continue from where you left off.
+
+    Prefer `_done()` if you've already applied a fix.
+    Prefer `_give_up()` only if the problem is fundamentally unautomatable
+    (e.g. requires human judgment, missing credentials).
+
+    Args:
+        findings: Your analysis so far — what you tried, what you found, and
+                  any hypotheses about the root cause or fix.
+    """
+    raise Escalate(findings)
+
+
 # Factory functions for internal tool sets
 def make_signal_tools() -> list[Callable[..., Any]]:
     """Signal tools for explorer mode (rule creation)."""
     return [_give_up, _request_templates, _submit_rule]
 
 
-def make_direct_fix_tools(rules_dir: Path | None = None) -> list[Callable[..., Any]]:
+def make_direct_fix_tools(
+    rules_dir: Path | None = None,
+    allow_escalation: bool = False,
+) -> list[Callable[..., Any]]:
     """Signal tools for direct fix mode (probabilistic rules)."""
     tools: list[Callable[..., Any]] = [_give_up, _done]
+    if allow_escalation:
+        tools.append(_escalate)
     if rules_dir:
         tools.append(_make_failed_rules_tool(rules_dir))
         tools.append(_make_observations_tool(rules_dir))
@@ -382,14 +420,10 @@ def write_file(path: str, content: str) -> str:
     p = Path(path)
     if p.suffix == ".py" and p.parent.name == "actions":
         return (
-            "ERROR: Cannot write action files with write_file. "
-            "Use the _write_action tool instead."
+            "ERROR: Cannot write action files with write_file. Use the _write_action tool instead."
         )
     if ".rule.yaml" in p.name:
-        return (
-            "ERROR: Cannot write rule files with write_file. "
-            "Use the _write_rule tool instead."
-        )
+        return "ERROR: Cannot write rule files with write_file. Use the _write_rule tool instead."
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
     return f"Written {len(content)} bytes to {path}"

@@ -6,12 +6,41 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
 
 if TYPE_CHECKING:
     from theow._core._decorators import ActionRegistry
+
+
+LLMRecordOutcome = Literal["success", "failure", "unverified"]
+
+
+@dataclass
+class LLMRecord:
+    """Structured record of an LLM recovery attempt."""
+
+    outcome: LLMRecordOutcome
+    rule: str
+    reason: str = ""
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    _extra: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        d = {
+            "timestamp": self.timestamp,
+            "outcome": self.outcome,
+            "rule": self.rule,
+            "reason": self.reason,
+        }
+        d.update(self._extra)
+        return d
+
+    def enrich(self, **kwargs: Any) -> None:
+        """Add extra fields from teardown hooks."""
+        self._extra.update(kwargs)
 
 
 @dataclass

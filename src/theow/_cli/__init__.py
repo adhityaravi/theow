@@ -37,6 +37,7 @@ def run(
     tail: Annotated[Optional[int], typer.Option("--tail")] = None,
     plugin: Annotated[Optional[str], typer.Option("--plugin")] = None,
     hint: Annotated[Optional[str], typer.Option("--hint")] = None,
+    escalate: Annotated[bool, typer.Option("--allow-escalation")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q")] = False,
 ) -> None:
     """Run a command with theow recovery."""
@@ -51,6 +52,7 @@ def run(
         tail=tail,
         plugin=plugin,
         hint=hint,
+        escalate=escalate,
         quiet=quiet,
     )
     raise typer.Exit(code=exit_code)

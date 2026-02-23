@@ -80,6 +80,13 @@ def build_tool_declaration(
 
 # Budget configuration
 SOFT_LIMIT_RATIO = 0.8  # Warn at 80% of budget
+MAX_TEXT_NUDGES = 2  # Max times to nudge LLM back on track after text-only replies
+
+TEXT_REPLY_NUDGE = (
+    "You responded with text instead of calling a tool. "
+    "You MUST call _done(summary) if you solved the problem, "
+    "or _give_up(reason) if you cannot. Do not respond with plain text."
+)
 
 
 @dataclass
@@ -145,6 +152,7 @@ class LLMGateway(ABC):
         state: SessionState,
         max_calls: int,
         max_tokens: int = 0,
+        allow_escalation: bool = False,
     ) -> str | None:
         """Check if budget warning should be issued.
 
@@ -178,7 +186,7 @@ class LLMGateway(ABC):
             max_tokens=max_tokens,
         )
 
-        return (
+        msg = (
             f"NOTE: {budget_status}. Start wrapping up, but don't rush.\n\n"
             f"Quality matters more than speed. Write a GENERIC solution that works for "
             f"similar errors, not just this specific case. Avoid hardcoding case-specific values.\n\n"
@@ -186,6 +194,14 @@ class LLMGateway(ABC):
             f"If you can't write a proper generic solution: use tags: [incomplete] and add notes. "
             f"The next attempt will continue from there."
         )
+
+        if allow_escalation:
+            msg += (
+                "\n\nIf you're stuck and need a more capable agent, call "
+                "`_escalate(findings)` with your analysis so far."
+            )
+
+        return msg
 
     def _build_tool_map(self, tools: list[Callable[..., Any]]) -> dict[str, Callable[..., Any]]:
         """Create name → function mapping from tools list."""

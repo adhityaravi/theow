@@ -118,3 +118,19 @@ def test_execute_tool_raises_signal():
 
     with pytest.raises(GiveUp):
         gw._execute_tool("signal_tool", {}, {"signal_tool": signal_tool})
+
+
+def test_check_budget_warning_with_escalation_hint():
+    gw = _TestGateway()
+    state = SessionState(tool_calls=25)
+    result = gw.check_budget_warning(state, max_calls=30, allow_escalation=True)
+    assert result is not None
+    assert "_escalate(findings)" in result
+
+
+def test_check_budget_warning_without_escalation_hint():
+    gw = _TestGateway()
+    state = SessionState(tool_calls=25)
+    result = gw.check_budget_warning(state, max_calls=30, allow_escalation=False)
+    assert result is not None
+    assert "_escalate" not in result

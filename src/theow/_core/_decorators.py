@@ -191,6 +191,7 @@ class MarkConfig:
     explorable: bool
     collection: str
     hint: str | None = None
+    allow_escalation: bool = False
     setup: Callable[[dict[str, Any], int], dict[str, Any] | None] | None = None
     teardown: Callable[[dict[str, Any], int, bool], None] | None = None
 
@@ -221,6 +222,7 @@ class MarkDecorator:
         explorable: bool = False,
         collection: str = "default",
         hint: str | None = None,
+        allow_escalation: bool = False,
         setup: Callable[[dict[str, Any], int], dict[str, Any] | None] | None = None,
         teardown: Callable[[dict[str, Any], int, bool], None] | None = None,
     ) -> Callable[[Callable[P, R]], Callable[P, R]]:
@@ -234,6 +236,7 @@ class MarkDecorator:
             explorable=explorable,
             collection=collection,
             hint=hint,
+            allow_escalation=allow_escalation,
             setup=setup,
             teardown=teardown,
         )
@@ -287,6 +290,7 @@ class MarkDecorator:
             fallback=config.fallback,
             explorable=config.explorable,
             hint=config.hint,
+            allow_escalation=config.allow_escalation,
         )
 
         # Wrap setup/teardown hooks to maintain hook_state
@@ -357,18 +361,24 @@ class MarkDecorator:
             exception_message=str(exc),
         )
 
-    def _execute_rule(self, rule: Rule, context: dict[str, Any] | None = None) -> bool:
+    def _execute_rule(
+        self,
+        rule: Rule,
+        context: dict[str, Any] | None = None,
+        escalation_context: str | None = None,
+    ) -> bool:
         """Execute rule's action (deterministic) or run LLM (probabilistic)."""
         logger.info("Attempting recovery", rule=rule.name)
         try:
             if rule.type == "probabilistic":
-                return self._execute_probabilistic_rule(rule, context or {})
+                return self._execute_probabilistic_rule(
+                    rule,
+                    context or {},
+                    escalation_context=escalation_context,
+                )
             else:
                 results = rule.act()
-                if any(
-                    isinstance(r, dict) and r.get("status") == "error"
-                    for r in results
-                ):
+                if any(isinstance(r, dict) and r.get("status") == "error" for r in results):
                     logger.warning("Action returned error", rule=rule.name)
                     return False
                 return True
@@ -376,7 +386,12 @@ class MarkDecorator:
             logger.warning("Action failed", rule=rule.name, error=str(err))
             return False
 
-    def _execute_probabilistic_rule(self, rule: Rule, context: dict[str, Any]) -> bool:
+    def _execute_probabilistic_rule(
+        self,
+        rule: Rule,
+        context: dict[str, Any],
+        escalation_context: str | None = None,
+    ) -> bool:
         """Execute a probabilistic rule by running LLM with the configured prompt."""
         if not rule.llm_config:
             logger.error("Bad rule config", rule=rule.name, error="missing llm_config")
@@ -400,10 +415,18 @@ class MarkDecorator:
             else:
                 logger.warning("Tool not found", tool=tool_name)
 
+        allow_escalation = rule.llm_config.constraints.get("allow_escalation", False)
         budget = {
             "max_tool_calls_per_session": rule.llm_config.constraints.get("max_tool_calls", 10),
             "max_tokens_per_session": rule.llm_config.constraints.get("max_tokens", 4096),
+            "allow_escalation": allow_escalation,
         }
 
         logger.debug("Executing LLM action", rule=rule.name)
-        return self._explorer.run_direct(prompt, tools, budget)
+        return self._explorer.run_direct(
+            prompt,
+            tools,
+            budget,
+            allow_escalation=allow_escalation,
+            escalation_context=escalation_context,
+        )

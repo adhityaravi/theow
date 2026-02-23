@@ -32,6 +32,7 @@ class ProfileConfig(BaseModel):
     fallback: bool = True
     plugin: str | None = None
     hint: str | None = None
+    allow_escalation: bool = False
 
 
 class TheowConfig(BaseModel):

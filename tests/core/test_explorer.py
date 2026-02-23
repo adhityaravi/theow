@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 from theow._core._decorators import ActionRegistry, TracingInfo
 from theow._core._explorer import Explorer
 from theow._core._models import Action, Fact, Rule
-from theow._core._tools import Done, GiveUp, RequestTemplates, SubmitRule
+from theow._core._tools import Done, Escalate, GiveUp, RequestTemplates, SubmitRule
 
 
 def _make_explorer(
@@ -553,3 +553,123 @@ def test_ensure_incomplete_tag(theow_dir):
     assert "incomplete" in rule.tags
     loaded = Rule.from_yaml(path)
     assert "incomplete" in loaded.tags
+
+
+def test_run_direct_escalate_signal():
+    """Primary calls _escalate, secondary takes over and returns Done."""
+    primary = MagicMock()
+    primary.conversation.side_effect = Escalate("stuck on X")
+    secondary = MagicMock()
+    secondary.conversation.side_effect = Done("fixed by secondary")
+
+    explorer = _make_explorer(gateway=primary)
+    explorer.set_secondary_gateway(secondary)
+
+    result = explorer.run_direct(
+        "fix this",
+        [],
+        {"max_tool_calls_per_session": 5},
+        allow_escalation=True,
+    )
+    assert result is True
+    assert explorer._last_done_message == "fixed by secondary"
+    secondary.conversation.assert_called_once()
+
+
+def test_run_direct_escalate_no_secondary():
+    """Escalate signal without secondary gateway returns False."""
+    primary = MagicMock()
+    primary.conversation.side_effect = Escalate("stuck")
+
+    explorer = _make_explorer(gateway=primary)
+    # No secondary set
+
+    result = explorer.run_direct(
+        "fix this",
+        [],
+        {"max_tool_calls_per_session": 5},
+        allow_escalation=True,
+    )
+    assert result is False
+
+
+def test_run_direct_escalation_context():
+    """Auto-escalation via escalation_context skips primary."""
+    primary = MagicMock()
+    secondary = MagicMock()
+    secondary.conversation.side_effect = Done("escalated fix")
+
+    explorer = _make_explorer(gateway=primary)
+    explorer.set_secondary_gateway(secondary)
+
+    result = explorer.run_direct(
+        "fix this",
+        [],
+        {"max_tool_calls_per_session": 5},
+        escalation_context="previous agent claimed fix but it failed",
+    )
+    assert result is True
+    assert explorer._last_done_message == "escalated fix"
+    # Primary should NOT have been called
+    primary.conversation.assert_not_called()
+    secondary.conversation.assert_called_once()
+
+
+def test_handle_signal_escalate():
+    """Escalate signal in explorer mode hands off to secondary."""
+    primary = MagicMock()
+    secondary = MagicMock()
+    # Secondary finishes with GiveUp
+    secondary.conversation.side_effect = GiveUp("still stuck")
+
+    explorer = _make_explorer(gateway=primary)
+    explorer.set_secondary_gateway(secondary)
+
+    signal = Escalate("tried X and Y")
+    messages = [{"role": "user", "content": "original prompt"}]
+    result = explorer._handle_signal(signal, messages, [], {}, "default")
+    assert result[0] is None
+    assert result[1] is True
+    secondary.conversation.assert_called_once()
+
+
+def test_handle_signal_escalate_no_secondary():
+    """Escalate without secondary returns (None, True)."""
+    explorer = _make_explorer(gateway=MagicMock())
+    signal = Escalate("tried X")
+    result = explorer._handle_signal(signal, [{"role": "user", "content": "p"}], [], {}, "default")
+    assert result == (None, True)
+
+
+def test_handle_signal_submit_rule_auto_escalate(theow_dir):
+    """SubmitRule validation failure with allow_escalation triggers secondary."""
+    rules_dir = theow_dir / "rules"
+    ephemeral_dir = rules_dir / "ephemeral"
+    ephemeral_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write a rule that won't match context (validation will fail)
+    rule = Rule(name="bad", description="Bad", when=[Fact(fact="x", equals="y")])
+    rule_path = ephemeral_dir / "bad.rule.yaml"
+    rule.to_yaml(rule_path)
+
+    primary = MagicMock()
+    secondary = MagicMock()
+    secondary.conversation.side_effect = GiveUp("cannot fix")
+
+    explorer = _make_explorer(gateway=primary, rules_dir=rules_dir)
+    explorer.set_secondary_gateway(secondary)
+
+    signal = SubmitRule(str(rule_path))
+    messages = [{"role": "user", "content": "original prompt"}]
+    result = explorer._handle_signal(
+        signal,
+        messages,
+        [],
+        {"x": "WRONG"},
+        "default",
+        allow_escalation=True,
+    )
+    # Validation fails (x != "WRONG"), so auto-escalation kicks in
+    assert result[0] is None
+    assert result[1] is True
+    secondary.conversation.assert_called_once()

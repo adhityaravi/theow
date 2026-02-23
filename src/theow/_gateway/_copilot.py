@@ -23,6 +23,8 @@ from theow._core._logging import get_engine_name, get_logger
 from theow._core._prompts import TEMPLATES
 from theow._core._tools import ExplorationSignal, GiveUp, RequestTemplates
 from theow._gateway._base import (
+    MAX_TEXT_NUDGES,
+    TEXT_REPLY_NUDGE,
     ConversationResult,
     LLMGateway,
     SessionState,
@@ -54,6 +56,7 @@ class CopilotGateway(LLMGateway):
         self._signal: ExplorationSignal | None = None
         self._gateway_config: dict[str, Any] = {}
         self._max_calls: int = 30
+        self._allow_escalation: bool = False
         # We use a persistent event loop instead of asyncio.run() because
         # multi-turn conversations (e.g., after RequestTemplates signal) require
         # multiple async calls. asyncio.run() closes the loop after each call,
@@ -68,6 +71,7 @@ class CopilotGateway(LLMGateway):
     ) -> ConversationResult:
         """Run conversation with tool use until signal or budget exhausted."""
         self._max_calls, self._max_tokens = self._extract_budget(budget)
+        self._allow_escalation = budget.get("allow_escalation", False)
         self._tool_map = self._build_tool_map(tools)
         self._state = SessionState()
         self._signal = None
@@ -78,12 +82,20 @@ class CopilotGateway(LLMGateway):
 
         logger.debug(f"{get_engine_name()} --> LLM", provider="copilot", model=self._model)
 
+        text_nudges = 0
         try:
             # Reuse event loop across conversation turns
             if self._loop is None or self._loop.is_closed():
                 self._loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(self._loop)
+
             response = self._loop.run_until_complete(self._run_conversation(user_prompt))
+
+            # Nudge loop: if LLM replied with text and no signal, re-send with nudge
+            while response and not self._signal and text_nudges < MAX_TEXT_NUDGES:
+                text_nudges += 1
+                logger.debug("Text-only reply, nudging LLM", nudge=text_nudges)
+                response = self._loop.run_until_complete(self._run_conversation(TEXT_REPLY_NUDGE))
         except Exception as e:
             logger.error("Copilot API error", error=str(e))
             raise
@@ -187,7 +199,9 @@ class CopilotGateway(LLMGateway):
             )
 
         warning = (
-            self.check_budget_warning(self._state, self._max_calls, self._max_tokens)
+            self.check_budget_warning(
+                self._state, self._max_calls, self._max_tokens, self._allow_escalation
+            )
             if self._state
             else None
         )

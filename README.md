@@ -192,6 +192,48 @@ sequenceDiagram
 - `teardown` errors are logged but never propagated - they cannot break recovery or the consumer pipeline.
 - If no hooks are provided, recovery works exactly as before. Hooks are fully optional.
 
+### Model Routing
+
+Model routing between a primary (cheaper) and secondary (stronger) LLM can be enabled with `allow_escalation=True` with a secondary LLM is configured. This enables two routing paths:
+
+**1. Voluntary escalation**: The primary LLM gets access to an `_escalate` tool. When it determines a problem is beyond its capability, it can call this tool to forward its findings to the secondary LLM. The secondary picks up the investigation with full context of what the primary already discovered. This saves tokens by letting a cheap model handle straightforward cases and only escalating complex ones.
+
+**2. Automatic escalation on false positives**: When the primary LLM claims a fix is done but verification fails (the marked function still raises), the engine automatically escalates to the secondary. The secondary receives what the primary claimed to fix and the new verification error, so it can course-correct without starting from scratch.
+
+```python
+pipeline_agent = Theow(
+    theow_dir="./.theow",
+    llm="gemini/gemini-2.0-flash",                      # primary (cheap)
+    llm_secondary="anthropic/claude-sonnet-4-20250514",  # secondary (strong)
+)
+
+@pipeline_agent.mark(
+    context_from=lambda task, exc: {"error": str(exc)},
+    allow_escalation=True,
+    explorable=True,
+)
+def process(task):
+    ...
+```
+
+Escalation requires `llm_secondary` to be configured. If no secondary is set, escalation is silently ignored — the `_escalate` tool is not registered and false-positive detection skips the escalation path.
+
+Escalation can also be enabled via the CLI:
+
+```bash
+theow run --allow-escalation <command>
+```
+
+Or in a profile (`config.yaml`):
+
+```yaml
+profiles:
+  production:
+    allow_escalation: true
+```
+
+This is not an agentic workflow with multi-worker orchestration. It's rather a simpler fallback mechanism to use a stronger model when needed without incurring the cost on every attempt. Might add an actual orchestrated agentic workflow in the future when the rest of the system is mature.
+
 ### Deep Recovery
 
 The recovery loop doesn't just retry - it detects **progress**. When a rule fixes its target error but a new one appears underneath, Theow keeps the workspace changes, resets the retry budget, and continues against the new error. This chains naturally across multiple depth levels.

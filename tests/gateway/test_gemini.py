@@ -94,7 +94,8 @@ def test_gemini_conversation_with_function_call():
             resp2.usage_metadata.total_token_count = 30
             resp2.usage_metadata.candidates_token_count = 10
 
-            mock_client.models.generate_content.side_effect = [resp1, resp2]
+            # tool call, then text reply + 2 nudge retries (all text)
+            mock_client.models.generate_content.side_effect = [resp1, resp2, resp2, resp2]
 
             def greet(name: str) -> str:
                 """Greet someone."""
@@ -109,7 +110,8 @@ def test_gemini_conversation_with_function_call():
             )
 
             assert result.tool_calls == 1
-            assert result.tokens_used == 80
+            # 1 tool resp (50 tokens) + 3 text responses (30 tokens each)
+            assert result.tokens_used == 50 + 30 * 3
 
 
 def test_gemini_conversation_signal():

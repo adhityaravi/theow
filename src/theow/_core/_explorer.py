@@ -17,10 +17,12 @@ from theow._core._prompts import ERROR, INTRO, TEMPLATES
 from theow._core._session_cache import SessionCache
 from theow._core._tools import (
     Done,
+    Escalate,
     ExplorationSignal,
     GiveUp,
     RequestTemplates,
     SubmitRule,
+    _escalate,
     make_direct_fix_tools,
     make_ephemeral_tools,
     make_search_tools,
@@ -97,6 +99,7 @@ class Explorer:
         attempt_number: int = 1,
         hint: str | None = None,
         exclude_rules: list[str] | None = None,
+        allow_escalation: bool = False,
     ) -> tuple[Rule | None, bool]:
         """Explore a novel situation using LLM.
 
@@ -133,7 +136,14 @@ class Explorer:
         locked = self._lock_permanent_files()
         try:
             rule, explored = self._run_conversation(
-                context, tools, collection, tracing, rejected_attempts, attempt_number, hint
+                context,
+                tools,
+                collection,
+                tracing,
+                rejected_attempts,
+                attempt_number,
+                hint,
+                allow_escalation=allow_escalation,
             )
         finally:
             self._unlock_permanent_files(locked)
@@ -202,6 +212,7 @@ class Explorer:
         rejected_attempts: list[dict[str, Any]] | None,
         attempt_number: int = 1,
         hint: str | None = None,
+        allow_escalation: bool = False,
     ) -> tuple[Rule | None, bool]:
         """Run multi-phase conversation with LLM.
 
@@ -213,6 +224,8 @@ class Explorer:
         ephemeral_tools = make_ephemeral_tools(self._rules_dir)
         validation_tools = make_validation_tools(self._rules_dir, context, self._action_registry)
         all_tools = signal_tools + search_tools + ephemeral_tools + validation_tools + tools
+        if allow_escalation and self._secondary_gateway is not None:
+            all_tools.append(_escalate)
 
         tools_section = self._build_tools_section(all_tools)
         intro = INTRO.format(
@@ -239,13 +252,27 @@ class Explorer:
             gw.set_gateway_config({"rules_dir": self._rules_dir})
 
         signal = self._converse(messages, all_tools)
-        result = self._handle_signal(signal, messages, all_tools, context, collection)
+        result = self._handle_signal(
+            signal,
+            messages,
+            all_tools,
+            context,
+            collection,
+            allow_escalation=allow_escalation,
+        )
 
         # Reset gateway state after conversation ends
         for gw in self._gateways:
             gw.reset()
 
         return result
+
+    @property
+    def _default_budget(self) -> dict[str, Any]:
+        return {
+            "max_tool_calls_per_session": self._max_tool_calls_per_session,
+            "max_tokens_per_session": self._max_tokens_per_session,
+        }
 
     def _converse(
         self,
@@ -256,10 +283,7 @@ class Explorer:
         """Run conversation until signal or budget exhausted."""
         assert self._gateway is not None
         if budget is None:
-            budget = {
-                "max_tool_calls_per_session": self._max_tool_calls_per_session,
-                "max_tokens_per_session": self._max_tokens_per_session,
-            }
+            budget = self._default_budget
 
         for i, gw in enumerate(self._gateways):
             try:
@@ -275,6 +299,27 @@ class Explorer:
 
         return None
 
+    def _converse_on(
+        self,
+        gateway: LLMGateway,
+        messages: list[dict[str, Any]],
+        tools: list[Callable[..., Any]],
+        budget: dict[str, Any],
+    ) -> ExplorationSignal | None:
+        """Run conversation on a single specific gateway (no cascade)."""
+        try:
+            gateway.conversation(messages=messages, tools=tools, budget=budget)
+            return None
+        except ExplorationSignal as signal:
+            return signal
+        except Exception as e:
+            logger.error("Escalated conversation failed", error=str(e))
+            return None
+
+    def _strip_escalate(self, tools: list[Callable[..., Any]]) -> list[Callable[..., Any]]:
+        """Return tools with _escalate removed (prevents escalation chains)."""
+        return [t for t in tools if getattr(t, "__name__", "") != "_escalate"]
+
     def _handle_signal(
         self,
         signal: ExplorationSignal | None,
@@ -282,6 +327,7 @@ class Explorer:
         tools: list[Callable[..., Any]],
         context: dict[str, Any],
         collection: str,
+        allow_escalation: bool = False,
     ) -> tuple[Rule | None, bool]:
         """Handle exploration signal with pattern matching.
 
@@ -304,6 +350,28 @@ class Explorer:
                 logger.warning("Exploration unsuccessful", reason=reason)
                 return None, True
 
+            case Escalate(findings=findings):
+                if self._secondary_gateway is None:
+                    logger.warning("Escalation requested but no secondary gateway")
+                    return None, True
+                logger.info("Escalating to secondary model")
+                original_prompt = messages[0]["content"] if messages else ""
+                esc_tools = self._strip_escalate(tools)
+                esc_signal = self._run_escalation(
+                    original_prompt,
+                    findings,
+                    esc_tools,
+                    self._default_budget,
+                )
+                return self._handle_signal(
+                    esc_signal,
+                    messages,
+                    esc_tools,
+                    context,
+                    collection,
+                    allow_escalation=False,
+                )
+
             case RequestTemplates():
                 logger.debug("Requesting rule creation")
                 templates = TEMPLATES.format(
@@ -312,10 +380,40 @@ class Explorer:
                 )
                 messages.append({"role": "user", "content": templates})
                 signal = self._converse(messages, tools)
-                return self._handle_signal(signal, messages, tools, context, collection)
+                return self._handle_signal(
+                    signal,
+                    messages,
+                    tools,
+                    context,
+                    collection,
+                    allow_escalation=allow_escalation,
+                )
 
             case SubmitRule(rule_file=rule_file, action_file=action_file):
                 rule = self._validate_rule(rule_file, action_file, context, collection)
+                if rule is None and allow_escalation and self._secondary_gateway is not None:
+                    logger.info("Rule validation failed, auto-escalating")
+                    original_prompt = messages[0]["content"] if messages else ""
+                    findings = (
+                        f"The previous model submitted a rule at {rule_file} but "
+                        "validation failed. Review what was attempted and try a "
+                        "different approach."
+                    )
+                    esc_tools = self._strip_escalate(tools)
+                    esc_signal = self._run_escalation(
+                        original_prompt,
+                        findings,
+                        esc_tools,
+                        self._default_budget,
+                    )
+                    return self._handle_signal(
+                        esc_signal,
+                        messages,
+                        esc_tools,
+                        context,
+                        collection,
+                        allow_escalation=False,
+                    )
                 return rule, True
 
             case _:
@@ -534,30 +632,75 @@ Try a different approach."""
     def _extract_query_text(self, context: dict[str, Any]) -> str:
         return extract_query_text(context)
 
+    def _run_escalation(
+        self,
+        prompt: str,
+        findings: str,
+        tools: list[Callable[..., Any]],
+        budget: dict[str, Any],
+    ) -> ExplorationSignal | None:
+        """Converse on secondary gateway with escalation context."""
+        assert self._secondary_gateway is not None
+        esc_prompt = (
+            prompt + "\n\n## Escalation Context\n\n"
+            "This task was escalated from a previous model attempt. "
+            "Here are the findings from that attempt:\n\n" + findings
+        )
+        messages: list[dict[str, Any]] = [{"role": "user", "content": esc_prompt}]
+        self._secondary_gateway.set_gateway_config({"rules_dir": self._rules_dir})
+        signal = self._converse_on(self._secondary_gateway, messages, tools, budget)
+        self._secondary_gateway.reset()
+        return signal
+
     def run_direct(
         self,
         prompt: str,
         tools: list[Callable[..., Any]],
         budget: dict[str, Any],
+        allow_escalation: bool = False,
+        escalation_context: str | None = None,
     ) -> bool:
         """Run LLM action conversation (for probabilistic rules).
+
+        Args:
+            allow_escalation: If True and secondary gateway exists, include
+                _escalate tool and handle Escalate signals.
+            escalation_context: If set, skip primary and run directly on
+                secondary with this context appended (auto-escalation path).
 
         Returns True if LLM signaled Done, False otherwise.
         """
         self._last_give_up_reason = None
         self._last_done_message = None
 
-        if self._gateway is None:
+        can_escalate = allow_escalation and self._secondary_gateway is not None
+        caller_tools = make_direct_fix_tools(self._rules_dir) + tools
+
+        # Auto-escalation: skip primary, go straight to secondary
+        if escalation_context and self._secondary_gateway is not None:
+            logger.info("Auto-escalating to secondary model")
+            signal = self._run_escalation(prompt, escalation_context, caller_tools, budget)
+        elif self._gateway is None:
             logger.warning("Cannot run LLM action: no LLM configured")
             return False
+        else:
+            all_tools = (
+                make_direct_fix_tools(
+                    self._rules_dir,
+                    allow_escalation=can_escalate,
+                )
+                + tools
+            )
+            messages = [{"role": "user", "content": prompt}]
+            signal = self._converse(messages, all_tools, budget)
 
-        all_tools = make_direct_fix_tools(self._rules_dir) + tools
+            for gw in self._gateways:
+                gw.reset()
 
-        messages = [{"role": "user", "content": prompt}]
-        signal = self._converse(messages, all_tools, budget)
-
-        for gw in self._gateways:
-            gw.reset()
+            # Primary called _escalate — hand off to secondary
+            if isinstance(signal, Escalate) and can_escalate:
+                logger.info("Escalating to secondary model")
+                signal = self._run_escalation(prompt, signal.findings, caller_tools, budget)
 
         match signal:
             case Done(message=message):

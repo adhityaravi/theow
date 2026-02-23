@@ -174,11 +174,13 @@ def test_recover_progress_detection(mock_attempt_fix):
         (rule_b, False),
     ]
 
-    run = MagicMock(side_effect=[
-        Attempt(success=False, context={"stderr": "error A"}),  # initial
-        Attempt(success=False, context={"stderr": "error B"}),  # after rule_a → progress
-        Attempt(success=True, value="fixed"),                    # after rule_b → success
-    ])
+    run = MagicMock(
+        side_effect=[
+            Attempt(success=False, context={"stderr": "error A"}),  # initial
+            Attempt(success=False, context={"stderr": "error B"}),  # after rule_a → progress
+            Attempt(success=True, value="fixed"),  # after rule_b → success
+        ]
+    )
 
     result = recover(run, engine, RecoveryConfig(max_retries=2, max_depth=3))
 
@@ -212,12 +214,16 @@ def test_recover_progress_resets_retries(mock_attempt_fix):
         (rule_b, False),  # depth 1, retry 2 — rule_b retried after reset
     ]
 
-    run = MagicMock(side_effect=[
-        Attempt(success=False, context={"stderr": "error A"}),  # initial
-        Attempt(success=False, context={"stderr": "error B"}),  # after rule_a → progress
-        Attempt(success=False, context={"stderr": "error B"}),  # after rule_b retry 1 → no progress
-        Attempt(success=True, value="done"),                     # after rule_b retry 2 → success
-    ])
+    run = MagicMock(
+        side_effect=[
+            Attempt(success=False, context={"stderr": "error A"}),  # initial
+            Attempt(success=False, context={"stderr": "error B"}),  # after rule_a → progress
+            Attempt(
+                success=False, context={"stderr": "error B"}
+            ),  # after rule_b retry 1 → no progress
+            Attempt(success=True, value="done"),  # after rule_b retry 2 → success
+        ]
+    )
 
     result = recover(run, engine, RecoveryConfig(max_retries=2, max_depth=3))
 
@@ -240,11 +246,17 @@ def test_recover_max_depth_exceeded(mock_attempt_fix):
     engine = _make_engine()
     mock_attempt_fix.side_effect = [(r, False) for r in rules]
 
-    run = MagicMock(side_effect=[
-        Attempt(success=False, context={"stderr": "error 0"}),  # initial
-        Attempt(success=False, context={"stderr": "error 1"}),  # after rule 0 → progress, depth=1
-        Attempt(success=False, context={"stderr": "error 2"}),  # after rule 1 → progress, depth=2
-    ])
+    run = MagicMock(
+        side_effect=[
+            Attempt(success=False, context={"stderr": "error 0"}),  # initial
+            Attempt(
+                success=False, context={"stderr": "error 1"}
+            ),  # after rule 0 → progress, depth=1
+            Attempt(
+                success=False, context={"stderr": "error 2"}
+            ),  # after rule 1 → progress, depth=2
+        ]
+    )
 
     result = recover(run, engine, RecoveryConfig(max_retries=3, max_depth=2))
 
@@ -260,6 +272,7 @@ def test_recover_progress_on_changed_captures(mock_attempt_fix):
     rule = MagicMock()
     rule.name = "fix-mismatch"
     rule.is_ephemeral = False
+
     # Matches both errors but with different captures
     def match_fn(ctx):
         stderr = ctx.get("stderr", "")
@@ -268,6 +281,7 @@ def test_recover_progress_on_changed_captures(mock_attempt_fix):
         if "module-B" in stderr:
             return {"mod": "module-B"}
         return None
+
     rule.matches = match_fn
 
     engine = _make_engine()
@@ -277,11 +291,13 @@ def test_recover_progress_on_changed_captures(mock_attempt_fix):
         (rule, False),  # depth 1: same rule re-resolved for module-B
     ]
 
-    run = MagicMock(side_effect=[
-        Attempt(success=False, context={"stderr": "error: module-A mismatch"}),
-        Attempt(success=False, context={"stderr": "error: module-B mismatch"}),
-        Attempt(success=True, value="fixed"),
-    ])
+    run = MagicMock(
+        side_effect=[
+            Attempt(success=False, context={"stderr": "error: module-A mismatch"}),
+            Attempt(success=False, context={"stderr": "error: module-B mismatch"}),
+            Attempt(success=True, value="fixed"),
+        ]
+    )
 
     result = recover(run, engine, RecoveryConfig(max_retries=3, max_depth=3))
 
@@ -320,3 +336,48 @@ def test_recover_breaks_on_give_up(mock_attempt_fix):
     assert run.call_count == 1
     # _attempt_fix called once, then loop breaks (not 3 times)
     assert mock_attempt_fix.call_count == 1
+
+
+@patch("theow._core._recover._attempt_fix")
+def test_recover_escalate_unverified(mock_attempt_fix):
+    """When primary claims done but verification fails, escalation to secondary is attempted."""
+    rule = MagicMock()
+    rule.name = "prob-rule"
+    rule.is_ephemeral = False
+    rule.type = "probabilistic"
+
+    engine = _make_engine(resolve_return=rule)
+
+    # First execute_rule: primary claims Done (sets _last_done_message)
+    # Verification fails, then try_escalate_unverified calls execute_rule again with escalation_context
+    call_count = {"n": 0}
+
+    def side_effect_execute(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # Primary: sets done message, "succeeds" action
+            engine._explorer._last_done_message = "I fixed it"
+            return True
+        # Escalated call: also succeeds
+        return True
+
+    engine.execute_rule = MagicMock(side_effect=side_effect_execute)
+    engine._explorer._secondary_gateway = MagicMock()
+
+    mock_attempt_fix.return_value = (rule, False)
+
+    run = MagicMock(
+        side_effect=[
+            Attempt(success=False, context={"stderr": "original error"}),
+            Attempt(success=False, context={"stderr": "original error"}),  # verification fails
+            Attempt(success=True, value="fixed"),  # after escalation
+        ]
+    )
+
+    result = recover(run, engine, RecoveryConfig(max_retries=2, allow_escalation=True))
+
+    assert result.success
+    # execute_rule called twice: once normal, once with escalation_context
+    assert engine.execute_rule.call_count == 2
+    second_call = engine.execute_rule.call_args_list[1]
+    assert second_call.kwargs.get("escalation_context") is not None

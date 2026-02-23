@@ -129,6 +129,7 @@ class Theow:
         explorable: bool = False,
         collection: str = "default",
         hint: str | None = None,
+        allow_escalation: bool = False,
         setup: Callable[[dict[str, Any], int], dict[str, Any] | None] | None = None,
         teardown: Callable[[dict[str, Any], int, bool], None] | None = None,
     ) -> Callable[[Callable[P, R]], Callable[P, R]]:
@@ -142,6 +143,7 @@ class Theow:
             explorable=explorable,
             collection=collection,
             hint=hint,
+            allow_escalation=allow_escalation,
             setup=setup,
             teardown=teardown,
         )
@@ -167,9 +169,18 @@ class Theow:
             exclude_rules=exclude_rules,
         )
 
-    def execute_rule(self, rule: Rule, context: dict[str, Any] | None = None) -> bool:
+    def execute_rule(
+        self,
+        rule: Rule,
+        context: dict[str, Any] | None = None,
+        escalation_context: str | None = None,
+    ) -> bool:
         """Execute a resolved rule's action. Returns True if successful."""
-        return self._mark_decorator._execute_rule(rule, context)
+        return self._mark_decorator._execute_rule(
+            rule,
+            context,
+            escalation_context=escalation_context,
+        )
 
     def get_tools(self) -> list[Callable[..., Any]]:
         """Get all registered tools as a list."""

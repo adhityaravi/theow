@@ -16,6 +16,8 @@ import anthropic
 from theow._core._logging import get_engine_name, get_logger
 from theow._core._tools import ExplorationSignal
 from theow._gateway._base import (
+    MAX_TEXT_NUDGES,
+    TEXT_REPLY_NUDGE,
     ConversationResult,
     LLMGateway,
     SessionState,
@@ -51,10 +53,12 @@ class AnthropicGateway(LLMGateway):
         Raises ExplorationSignal subclasses when LLM calls signal tools.
         """
         max_calls, max_tokens = self._extract_budget(budget)
+        allow_escalation = budget.get("allow_escalation", False)
         tool_map = self._build_tool_map(tools)
         declarations = self._build_tool_declarations(tools)
 
         state = SessionState()
+        text_nudges = 0
 
         while state.tool_calls < max_calls and not (
             max_tokens > 0 and state.tokens_used > max_tokens
@@ -65,13 +69,18 @@ class AnthropicGateway(LLMGateway):
 
             tool_calls = self._extract_tool_calls(response, messages)
             if not tool_calls:
+                if text_nudges < MAX_TEXT_NUDGES:
+                    text_nudges += 1
+                    logger.debug("Text-only reply, nudging LLM", nudge=text_nudges)
+                    messages.append({"role": "user", "content": TEXT_REPLY_NUDGE})
+                    continue
                 break
 
             # Execute tools - may raise ExplorationSignal
             self._execute_tool_calls(tool_calls, tool_map, messages, state)
 
             # Check for budget warning after tool execution
-            warning = self.check_budget_warning(state, max_calls, max_tokens)
+            warning = self.check_budget_warning(state, max_calls, max_tokens, allow_escalation)
             if warning:
                 messages.append({"role": "user", "content": warning})
 
