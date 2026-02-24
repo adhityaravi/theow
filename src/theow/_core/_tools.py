@@ -51,6 +51,14 @@ class Escalate(ExplorationSignal):
         super().__init__(f"Escalate: {findings}")
 
 
+class RuleResolved(ExplorationSignal):
+    """LLM augmented an existing rule so it now handles this case."""
+
+    def __init__(self, summary: str = "") -> None:
+        self.summary = summary
+        super().__init__(f"Rule resolved: {summary}")
+
+
 class Done(ExplorationSignal):
     """LLM finished direct fix, ready for retry."""
 
@@ -100,6 +108,20 @@ def _submit_rule(rule_file: str, action_file: str | None = None) -> None:
     raise SubmitRule(rule_file, action_file)
 
 
+def _rule_resolved(summary: str = "") -> None:
+    """Signal that an existing rule was augmented to handle this error.
+
+    IMPORTANT: Only call this AFTER _test_rule_match() confirms all facts pass.
+    The system re-checks rules using fact matching — if facts don't match, the
+    rule won't execute. _add_example_to_rule() only improves search recall, it
+    does NOT change fact matching. Use _add_fact_to_rule() to extend matchers.
+
+    Args:
+        summary: Brief description of what was augmented.
+    """
+    raise RuleResolved(summary)
+
+
 def _done(message: str = "") -> None:
     """Signal that you have completed the task.
 
@@ -132,7 +154,7 @@ def _escalate(findings: str) -> None:
 # Factory functions for internal tool sets
 def make_signal_tools() -> list[Callable[..., Any]]:
     """Signal tools for explorer mode (rule creation)."""
-    return [_give_up, _request_templates, _submit_rule]
+    return [_give_up, _request_templates, _submit_rule, _rule_resolved]
 
 
 def make_direct_fix_tools(
@@ -403,6 +425,116 @@ def make_ephemeral_tools(rules_dir: Path) -> list[Callable[..., Any]]:
         return {"path": str(path), "message": f"Action written to {path}"}
 
     return [_list_ephemeral_rules, _read_ephemeral_rule, _write_rule, _write_action]
+
+
+def make_augmentation_tools(
+    rules_dir: Path,
+    context: dict[str, Any],
+    chroma: ChromaStore,
+) -> list[Callable[..., Any]]:
+    """Create tools for augmenting existing rules with new facts/examples."""
+    from theow._core._models import Fact, Rule
+
+    def _add_fact_to_rule(
+        rule_name: str,
+        fact: str,
+        equals: str = "",
+        contains: str = "",
+        regex: str = "",
+        examples: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Add a new when-fact to an existing permanent rule.
+
+        Use this to extend a rule to match new error patterns instead of creating
+        a duplicate rule. The new fact must match the current error context.
+        Facts are ANDed, so adding a fact makes the rule more specific.
+
+        Args:
+            rule_name: Name of the rule to augment (without .rule.yaml).
+            fact: The context key to match (e.g. 'stderr', 'error').
+            equals: Exact match value. Mutually exclusive with contains/regex.
+            contains: Substring match. Mutually exclusive with equals/regex.
+            regex: Regex pattern with optional named captures. Mutually exclusive with equals/contains.
+            examples: Example strings that improve vector search recall.
+        """
+        rule_path = rules_dir / f"{rule_name}.rule.yaml"
+        if not rule_path.exists():
+            return {"error": f"Rule not found: {rule_name}"}
+
+        operators = [v for v in (equals, contains, regex) if v]
+        if len(operators) != 1:
+            return {"error": "Provide exactly one of: equals, contains, regex"}
+
+        new_fact = Fact(
+            fact=fact,
+            equals=equals or None,
+            contains=contains or None,
+            regex=regex or None,
+            examples=examples or [],
+        )
+
+        # Validate the new fact matches the current context
+        value = context.get(fact)
+        if new_fact.matches(value) is None:
+            return {
+                "error": "New fact does not match current context",
+                "fact_key": fact,
+                "actual_value": str(value)[:200] if value else "(missing)",
+            }
+
+        # Temporarily make writable, add fact, re-lock
+        original_mode = rule_path.stat().st_mode
+        rule_path.chmod(0o644)
+        try:
+            rule = Rule.from_yaml(rule_path)
+            rule.add_fact(new_fact)
+            chroma.index_rule(rule)
+        finally:
+            rule_path.chmod(original_mode)
+
+        return {
+            "status": "ok",
+            "rule": rule_name,
+            "added_fact": new_fact.to_dict(),
+        }
+
+    def _add_example_to_rule(
+        rule_name: str,
+        fact_key: str,
+        example: str,
+    ) -> dict[str, Any]:
+        """Add an example to an existing fact in a rule to improve search recall.
+
+        Examples don't change matching logic — they only help the vector search
+        find this rule for similar error patterns. Always safe to add.
+
+        Args:
+            rule_name: Name of the rule (without .rule.yaml).
+            fact_key: The fact's context key (e.g. 'stderr') to add the example to.
+            example: An example error string that this rule should match.
+        """
+        rule_path = rules_dir / f"{rule_name}.rule.yaml"
+        if not rule_path.exists():
+            return {"error": f"Rule not found: {rule_name}"}
+
+        original_mode = rule_path.stat().st_mode
+        rule_path.chmod(0o644)
+        try:
+            rule = Rule.from_yaml(rule_path)
+            if not rule.add_example_to_fact(fact_key, example):
+                return {"error": f"No regex fact with key '{fact_key}' found in rule"}
+            chroma.index_rule(rule)
+        finally:
+            rule_path.chmod(original_mode)
+
+        return {
+            "status": "ok",
+            "rule": rule_name,
+            "fact_key": fact_key,
+            "example_added": example,
+        }
+
+    return [_add_fact_to_rule, _add_example_to_rule]
 
 
 # Theow external tools for consumers. Not registered by default, consumers can choose to register them.

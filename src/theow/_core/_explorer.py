@@ -21,8 +21,10 @@ from theow._core._tools import (
     ExplorationSignal,
     GiveUp,
     RequestTemplates,
+    RuleResolved,
     SubmitRule,
     _escalate,
+    make_augmentation_tools,
     make_direct_fix_tools,
     make_ephemeral_tools,
     make_search_tools,
@@ -70,6 +72,7 @@ class Explorer:
         self._pending_cleanup: list[Path] = []  # Files to clean up after all retries
         self._last_give_up_reason: str | None = None
         self._last_done_message: str | None = None
+        self._escalate_next: bool = False
 
     def set_gateway(self, gateway: LLMGateway) -> None:
         """Set the LLM gateway (for lazy initialization)."""
@@ -223,7 +226,15 @@ class Explorer:
         search_tools = make_search_tools(self._chroma, collection, self._rules_dir)
         ephemeral_tools = make_ephemeral_tools(self._rules_dir)
         validation_tools = make_validation_tools(self._rules_dir, context, self._action_registry)
-        all_tools = signal_tools + search_tools + ephemeral_tools + validation_tools + tools
+        augmentation_tools = make_augmentation_tools(self._rules_dir, context, self._chroma)
+        all_tools = (
+            signal_tools
+            + search_tools
+            + ephemeral_tools
+            + validation_tools
+            + augmentation_tools
+            + tools
+        )
         if allow_escalation and self._secondary_gateway is not None:
             all_tools.append(_escalate)
 
@@ -251,7 +262,14 @@ class Explorer:
         for gw in self._gateways:
             gw.set_gateway_config({"rules_dir": self._rules_dir})
 
-        signal = self._converse(messages, all_tools)
+        if allow_escalation and self._escalate_next and self._secondary_gateway is not None:
+            self._escalate_next = False
+            logger.info("Escalating to secondary model after action failure")
+            signal = self._converse_on(
+                self._secondary_gateway, messages, all_tools, self._default_budget
+            )
+        else:
+            signal = self._converse(messages, all_tools)
         result = self._handle_signal(
             signal,
             messages,
@@ -259,6 +277,7 @@ class Explorer:
             context,
             collection,
             allow_escalation=allow_escalation,
+            hint=hint,
         )
 
         # Reset gateway state after conversation ends
@@ -328,6 +347,7 @@ class Explorer:
         context: dict[str, Any],
         collection: str,
         allow_escalation: bool = False,
+        hint: str | None = None,
     ) -> tuple[Rule | None, bool]:
         """Handle exploration signal with pattern matching.
 
@@ -350,6 +370,15 @@ class Explorer:
                 logger.warning("Exploration unsuccessful", reason=reason)
                 return None, True
 
+            case RuleResolved(summary=summary):
+                logger.info("Explorer augmented existing rule", summary=summary)
+                # Re-check chroma — augmentation should have made an existing rule findable
+                chroma_match = self._check_chroma(context, collection)
+                if chroma_match:
+                    return chroma_match, True
+                logger.warning("Rule resolved signal but no chroma match found")
+                return None, True
+
             case Escalate(findings=findings):
                 if self._secondary_gateway is None:
                     logger.warning("Escalation requested but no secondary gateway")
@@ -370,6 +399,7 @@ class Explorer:
                     context,
                     collection,
                     allow_escalation=False,
+                    hint=hint,
                 )
 
             case RequestTemplates():
@@ -378,6 +408,16 @@ class Explorer:
                     rules_dir=self._rules_dir,
                     actions_dir=self._rules_dir.parent / "actions",
                 )
+                templates += (
+                    "\n\n## CRITICAL: Action Design"
+                    "\n\nActions MUST do ONE atomic fix and return ok."
+                    " Do NOT run verification or rebuild commands inside the action."
+                    " The recovery loop handles verification, retries, and iteration."
+                    " Actions that verify internally will fail on unrelated errors"
+                    " and get rejected even when their fix was correct."
+                )
+                if hint:
+                    templates += f"\n\n## Caller Constraints (MUST follow)\n\n{hint}"
                 messages.append({"role": "user", "content": templates})
                 signal = self._converse(messages, tools)
                 return self._handle_signal(
@@ -387,6 +427,7 @@ class Explorer:
                     context,
                     collection,
                     allow_escalation=allow_escalation,
+                    hint=hint,
                 )
 
             case SubmitRule(rule_file=rule_file, action_file=action_file):
@@ -413,6 +454,7 @@ class Explorer:
                         context,
                         collection,
                         allow_escalation=False,
+                        hint=hint,
                     )
                 return rule, True
 
@@ -672,6 +714,19 @@ Try a different approach."""
         """
         self._last_give_up_reason = None
         self._last_done_message = None
+
+        if self._session_count >= self._session_limit:
+            logger.warning(
+                "Session limit reached", count=self._session_count, limit=self._session_limit
+            )
+            return False
+
+        self._session_count += 1
+
+        logger.info(
+            "Starting LLM action",
+            session=f"{self._session_count}/{self._session_limit}",
+        )
 
         can_escalate = allow_escalation and self._secondary_gateway is not None
         caller_tools = make_direct_fix_tools(self._rules_dir) + tools

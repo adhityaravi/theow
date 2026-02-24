@@ -45,13 +45,29 @@ in the rules or actions directories.
 3. **Search first** - Use `_search_rules()` and `_search_actions()` to check if a
    similar solution already exists. Don't reinvent the wheel.
 
-4. **Investigate** - Read files, run commands, understand the root cause.
+4. **Augment before creating** - If an existing rule handles a similar problem but
+   its facts don't quite match, use `_add_fact_to_rule()` to extend its matching,
+   or `_add_example_to_rule()` to improve its search recall. This is ALWAYS preferred
+   over creating a duplicate rule. Only create a new rule when no existing rule
+   covers the same problem domain.
 
-5. **Fix & verify** - Apply a fix and confirm it works.
+   **IMPORTANT**: `_add_example_to_rule()` only improves vector search recall — it
+   does NOT change fact matching. If the rule's `when` facts don't match the current
+   error, you MUST also use `_add_fact_to_rule()` to extend its matchers.
 
-6. **Codify** - When ready to write a rule, call `request_templates()` to get
+   After augmenting, ALWAYS call `_test_rule_match(rule_path)` to verify the rule
+   now matches the current error context. Only call `_rule_resolved(summary)` after
+   `_test_rule_match` confirms all facts pass. The system will re-check rules and
+   execute the matching one.
+
+5. **Investigate** - Read files, run commands, understand the root cause.
+
+6. **Fix & verify** - Apply a fix and confirm it works.
+
+7. **Codify** - When ready to write a rule, call `request_templates()` to get
    the rule/action syntax. Then write the files and call `submit_rule()`.
 
+If augmenting existing rules resolves the issue, verify with `_test_rule_match()` then call `_rule_resolved(summary)`.
 If the problem can't or shouldn't be automated, call `_give_up(reason)`.
 """
 
@@ -63,9 +79,28 @@ ERROR = """## Error Context
 Investigate this failure. Start by searching for existing rules that might handle similar errors.
 """
 
-TEMPLATES = """## Rule & Action Templates
+TEMPLATES = """## Before Creating a New Rule
 
-Now write a rule that captures the GENERAL pattern (not just this specific case).
+STOP. Are you sure a new rule is necessary?
+
+Vector search may have missed an existing rule because:
+- The rule's examples don't cover this specific error wording
+- The rule's description uses different terminology
+- The error context was too noisy for similarity matching
+
+Before writing a new rule:
+1. Re-check the rules you found with `_search_rules()` — could any of them
+   handle this case if their facts were extended?
+2. If yes, use `_add_fact_to_rule()` to extend matching or
+   `_add_example_to_rule()` to improve search recall. This is preferred.
+3. Only create a new rule if the error pattern is genuinely novel and no
+   existing rule covers the same problem domain.
+
+If you are certain a new rule is needed, proceed below.
+
+## Rule & Action Templates
+
+Write a rule that captures the GENERAL pattern (not just this specific case).
 
 ### CRITICAL: Verify Before Writing
 
@@ -138,6 +173,10 @@ def action_name(workspace: str, expected: str) -> dict:
 - The `@action("name")` decorator MUST include the name string. Bare `@action` will silently fail.
 - Keep actions succinct and readable. Compose long functions into smaller helpers.
 - Solve the problem generically. NEVER hardcode case-specific values.
+- **Do ONE atomic fix and return `{{"status": "ok"}}`**. Do NOT run verification or
+  rebuild commands inside the action — the recovery loop handles verification, retries,
+  and iteration. Actions that verify internally will fail on unrelated errors and get
+  rejected even when their fix was correct.
 
 **Workflow:**
 1. `_write_rule(name, content)` → returns path in result

@@ -312,6 +312,23 @@ class Rule:
 
         return results
 
+    def add_fact(self, fact: Fact) -> None:
+        """Append a new fact to the rule's when block and persist to disk."""
+        self.when.append(fact)
+        if self._source_path:
+            self.to_yaml(self._source_path)
+
+    def add_example_to_fact(self, fact_key: str, example: str) -> bool:
+        """Append an example to an existing fact. Returns True if found and added."""
+        for fact in self.when:
+            if fact.fact == fact_key and fact.regex is not None:
+                if example not in fact.examples:
+                    fact.examples.append(example)
+                    if self._source_path:
+                        self.to_yaml(self._source_path)
+                    return True
+        return False
+
     def content_hash(self) -> str:
         """Compute hash of rule content for change detection."""
         content = self.to_yaml()

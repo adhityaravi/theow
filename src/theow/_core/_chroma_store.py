@@ -180,7 +180,12 @@ class ChromaStore:
         """
         coll = self._get_collection(collection)
 
-        where = metadata_filter if metadata_filter else None
+        if metadata_filter and len(metadata_filter) > 1:
+            where = {"$and": [{k: v} for k, v in metadata_filter.items()]}
+        elif metadata_filter:
+            where = metadata_filter
+        else:
+            where = None
 
         try:
             results = coll.query(

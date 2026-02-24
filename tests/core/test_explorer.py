@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 from theow._core._decorators import ActionRegistry, TracingInfo
 from theow._core._explorer import Explorer
 from theow._core._models import Action, Fact, Rule
-from theow._core._tools import Done, Escalate, GiveUp, RequestTemplates, SubmitRule
+from theow._core._tools import Done, Escalate, GiveUp, RequestTemplates, RuleResolved, SubmitRule
 
 
 def _make_explorer(
@@ -673,3 +673,44 @@ def test_handle_signal_submit_rule_auto_escalate(theow_dir):
     assert result[0] is None
     assert result[1] is True
     secondary.conversation.assert_called_once()
+
+
+def test_handle_signal_rule_resolved_with_chroma_match(theow_dir):
+    """RuleResolved signal re-checks chroma and returns matching rule."""
+    rules_dir = theow_dir / "rules"
+    action_registry = ActionRegistry()
+
+    # Create a rule that will be found by chroma after augmentation
+    existing_rule = Rule(
+        name="augmented_rule",
+        description="Augmented",
+        when=[Fact(fact="x", equals="y")],
+    )
+    existing_rule.to_yaml(rules_dir / "augmented_rule.rule.yaml")
+
+    chroma = MagicMock()
+    chroma.query_rules.return_value = [("augmented_rule", 0.1, {})]
+
+    explorer = _make_explorer(
+        chroma=chroma,
+        action_registry=action_registry,
+        rules_dir=rules_dir,
+    )
+
+    signal = RuleResolved("added example to rule augmented_rule")
+    result = explorer._handle_signal(signal, [], [], {"x": "y"}, "default")
+    assert result[0] is not None
+    assert result[0].name == "augmented_rule"
+    assert result[1] is True
+
+
+def test_handle_signal_rule_resolved_no_chroma_match():
+    """RuleResolved signal with no chroma match returns (None, True)."""
+    chroma = MagicMock()
+    chroma.query_rules.return_value = []
+
+    explorer = _make_explorer(chroma=chroma)
+
+    signal = RuleResolved("augmented")
+    result = explorer._handle_signal(signal, [], [], {"x": "y"}, "default")
+    assert result == (None, True)

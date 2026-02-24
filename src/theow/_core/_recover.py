@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
@@ -66,7 +67,26 @@ class _RecoveryLoop:
         self._retry = 0
         self._attempt_num = 0
         self._explored = False
+        self._seen_errors: set[str] = set()
         self.abort = False
+
+    def check_cycle(self, context: dict[str, Any]) -> bool:
+        """Check if this error context has been seen before (cycle detection).
+
+        Returns True if context fingerprint was already seen (cycle).
+        Otherwise records it and returns False.
+        """
+        fp = self._error_fingerprint(context)
+        if fp in self._seen_errors:
+            return True
+        self._seen_errors.add(fp)
+        return False
+
+    @staticmethod
+    def _error_fingerprint(context: dict[str, Any]) -> str:
+        """Create a hash fingerprint of error context for cycle detection."""
+        raw = str(sorted((k, str(v)[:500]) for k, v in context.items()))
+        return hashlib.sha256(raw.encode()).hexdigest()
 
     @property
     def max_iterations(self) -> int:
@@ -148,6 +168,8 @@ class _RecoveryLoop:
 
         self._engine._chroma.update_rule_stats(self._config.collection, rule.name, False)
         gave_up = self._engine._explorer._last_give_up_reason
+        if not gave_up and self._try_escalate_action_failure(rule, context):
+            return True
         _teardown_failure(
             self._engine,
             self._hook_state,
@@ -258,6 +280,22 @@ class _RecoveryLoop:
         )
         return self._engine.execute_rule(rule, context, escalation_context=findings)
 
+    def _try_escalate_action_failure(self, rule: Rule, context: dict[str, Any]) -> bool:
+        """Flag explorer to use secondary gateway on next exploration.
+
+        When an explored rule's action fails, the recovery loop already retries
+        with a new exploration.  This just ensures that next exploration uses
+        the secondary (escalated) model instead of the primary.
+        """
+        if not self._config.allow_escalation:
+            return False
+        if self._engine._explorer._secondary_gateway is None:
+            return False
+
+        logger.info("Escalating after action failure", rule=rule.name)
+        self._engine._explorer._escalate_next = True
+        return False
+
     def cleanup(self) -> None:
         _cleanup(self._engine, self._rejected)
 
@@ -300,6 +338,7 @@ def recover(
 
     logger.info("Failure captured", error=_truncate(attempt.context.get("stderr", "")))
     loop = _RecoveryLoop(engine, config, before_attempt, after_attempt)
+    loop.check_cycle(attempt.context)  # seed with initial error
 
     try:
         for _ in range(loop.max_iterations):
@@ -335,6 +374,13 @@ def recover(
             # captures (fixed one instance, another instance of same pattern).
             new_captures = rule.matches(attempt.context)
             if new_captures is None or new_captures != prev_captures:
+                if loop.check_cycle(attempt.context):
+                    logger.warning(
+                        "Recovery cycle detected",
+                        rule=rule.name,
+                        depth=loop._depth,
+                    )
+                    break
                 if not loop.on_progress(rule):
                     break
                 continue

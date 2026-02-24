@@ -381,3 +381,41 @@ def test_recover_escalate_unverified(mock_attempt_fix):
     assert engine.execute_rule.call_count == 2
     second_call = engine.execute_rule.call_args_list[1]
     assert second_call.kwargs.get("escalation_context") is not None
+
+
+@patch("theow._core._recover._attempt_fix")
+def test_recover_cycle_detection(mock_attempt_fix):
+    """Two rules undoing each other's work should be detected as a cycle."""
+    rule_a = MagicMock()
+    rule_a.name = "fix-error-a"
+    rule_a.is_ephemeral = False
+    rule_a.matches = lambda ctx: {} if "error A" in ctx.get("stderr", "") else None
+
+    rule_b = MagicMock()
+    rule_b.name = "fix-error-b"
+    rule_b.is_ephemeral = False
+    rule_b.matches = lambda ctx: {} if "error B" in ctx.get("stderr", "") else None
+
+    engine = _make_engine()
+
+    # Rule A resolves for error A, rule B resolves for error B, then rule A again
+    mock_attempt_fix.side_effect = [
+        (rule_a, False),
+        (rule_b, False),
+        (rule_a, False),  # should never be reached
+    ]
+
+    run = MagicMock(
+        side_effect=[
+            Attempt(success=False, context={"stderr": "error A"}),  # initial
+            Attempt(success=False, context={"stderr": "error B"}),  # after rule_a → progress
+            Attempt(success=False, context={"stderr": "error A"}),  # after rule_b → CYCLE
+        ]
+    )
+
+    result = recover(run, engine, RecoveryConfig(max_retries=3, max_depth=50))
+
+    assert not result.success
+    # Only 2 rules attempted — cycle detected before 3rd
+    assert mock_attempt_fix.call_count == 2
+    assert run.call_count == 3
