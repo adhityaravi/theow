@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.19](https://github.com/adhityaravi/theow/compare/theow-v0.0.18...theow-v0.0.19) (2026-02-24)
+
+
+### Features
+
+* general vector matching improvements ([510a5dc](https://github.com/adhityaravi/theow/commit/510a5dc1e717ad201378799a0dbce5d10e922d39))
+
 ## [0.0.18](https://github.com/adhityaravi/theow/compare/theow-v0.0.17...theow-v0.0.18) (2026-02-23)
 
 
