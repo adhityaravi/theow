@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.20](https://github.com/adhityaravi/theow/compare/theow-v0.0.19...theow-v0.0.20) (2026-03-01)
+
+
+### Features
+
+* make teardown hook intentionally failable ([6f70035](https://github.com/adhityaravi/theow/commit/6f70035a3bc85d2d9fdb683cf8d016d5e2f05d42))
+
 ## [0.0.19](https://github.com/adhityaravi/theow/compare/theow-v0.0.18...theow-v0.0.19) (2026-02-24)
 
 
