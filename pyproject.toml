@@ -50,6 +50,9 @@ path = "src/theow/_version.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/theow"]
 
+[tool.ty.src]
+exclude = ["src/theow/_codegraph/examples/"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
