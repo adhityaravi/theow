@@ -20,6 +20,7 @@ COMPONENT_MAP = {
     "theow._core._chroma_store": "chroma",
     "theow._core._recover": "recovery",
     "theow._cli._run": "cli",
+    "theow._codegraph._graph": "codegraph",
 }
 
 

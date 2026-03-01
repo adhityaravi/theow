@@ -24,6 +24,11 @@ theow = "theow._cli:app"
 daemon = [
     # Future: trio, httpx, etc. for server mode
 ]
+codegraph = [
+    "tree-sitter>=0.23",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-go>=0.23",
+]
 
 [dependency-groups]
 dev = [

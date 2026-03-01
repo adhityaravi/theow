@@ -78,6 +78,7 @@ def test_component_map_coverage():
         "engine",
         "chroma",
         "cli",
+        "codegraph",
     }
     actual_components = set(COMPONENT_MAP.values())
     assert actual_components == expected_components

@@ -1,0 +1,7 @@
+[run]
+omit =
+    src/theow/_codegraph/*
+    src/theow/codegraph.py
+
+[report]
+fail_under = 85
