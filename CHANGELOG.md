@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.21](https://github.com/adhityaravi/theow/compare/theow-v0.0.20...theow-v0.0.21) (2026-03-01)
+
+
+### Features
+
+* adds a codegraph query tool ([#21](https://github.com/adhityaravi/theow/issues/21)) ([dab8baf](https://github.com/adhityaravi/theow/commit/dab8baf918f2e8698619752f07ecb5133b67aa3d))
+
 ## [0.0.20](https://github.com/adhityaravi/theow/compare/theow-v0.0.19...theow-v0.0.20) (2026-03-01)
 
 
