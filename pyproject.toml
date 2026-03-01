@@ -24,6 +24,11 @@ theow = "theow._cli:app"
 daemon = [
     # Future: trio, httpx, etc. for server mode
 ]
+codegraph = [
+    "tree-sitter>=0.23",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-go>=0.23",
+]
 
 [dependency-groups]
 dev = [
@@ -44,6 +49,9 @@ path = "src/theow/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/theow"]
+
+[tool.ty.src]
+exclude = ["src/theow/_codegraph/examples/"]
 
 [tool.ruff]
 line-length = 100

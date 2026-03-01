@@ -391,6 +391,21 @@ def run_safe_command(cmd: str) -> dict:
 
 This is the key to secure automation. You define the blast radius. The LLM operates within those boundaries.
 
+### CodeGraph
+
+CodeGraph gives the explorer structural awareness of your codebase. Instead of reading entire files to orient, the LLM queries a tree-sitter based graph for symbols, call chains, imports, and class hierarchies.
+
+```python
+from theow.codegraph import CodeGraph
+
+graph = CodeGraph(root="./src")
+pipeline_agent.tool()(graph.search_code)
+```
+
+The LLM gets a single `search_code` tool that supports multiple scopes: find symbols by name, trace callers/callees, list file contents, follow class hierarchies, and find paths between symbols.
+
+CodeGraph is an optional dependency — install with `pip install theow[codegraph]`. See the [CodeGraph README](src/theow/_codegraph/README.md) for full documentation.
+
 ## LLM Based Actions
 
 Rules can invoke the LLM directly on match instead of running a deterministic action. Useful for failures that need dynamic investigation rather than a fixed fix.
