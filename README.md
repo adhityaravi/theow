@@ -7,9 +7,9 @@
 
 ---
 
-Theow is a [rule engine](https://www.geeksforgeeks.org/artificial-intelligence/rule-based-system-in-ai/) designed for auto-failover. It captures failure context automatically, semantically matches it against existing rules, and executes bound actions for recovery. Rules are deterministic. Same context, same fix, every time.
+Theow is an embeddable [rule engine](https://www.geeksforgeeks.org/artificial-intelligence/rule-based-system-in-ai/) for self-healing workflows. Written in Python, but capable of healing any process through user-defined tools and actions. It captures failure context automatically, semantically matches it against existing rules, and executes bound actions for recovery.
 
-When no rule matches, Theow's internal agent uses an LLM to investigate and write a new rule. This agent is leashed and programmatic by design. It restricts the LLM to a defined set of tools. You specify what the LLM can do, nothing more, providing full but secure automation. As rules accumulate, LLM calls decrease. Since failure modes are finite, they may reach zero over time.
+When no rule matches, Theow automatically calls an LLM to diagnose the failure and heal the code on the fly. Depending on configuration, the LLM can write a new rule for future reuse or directly fix the error in place. The LLM is leashed to a defined set of tools you specify, nothing more, providing full but secure automation. As rules accumulate, LLM calls decrease. Since failure modes are finite, they may reach zero over time.
 
 ![Theow Workflow](assets/theow.excalidraw.svg)
 
