@@ -533,13 +533,22 @@ def _call_after(
     attempt: int,
     success: bool,
 ) -> None:
-    """Call teardown hook safely."""
+    """Call teardown hook safely.
+
+    By default, exceptions are suppressed with a warning. The teardown
+    can set ``state["suppress_exc"] = False`` before raising to make
+    the exception propagate to the caller.
+    """
     if not after_attempt:
         return
     try:
         after_attempt(state, attempt, success)
     except Exception as hook_err:
-        logger.warning("Teardown hook failed", error=str(hook_err))
+        if state.get("suppress_exc", True):
+            logger.warning("Teardown hook failed", error=str(hook_err))
+        else:
+            logger.error("Teardown hook failed", error=str(hook_err))
+            raise
 
 
 def _truncate(text: Any, max_len: int = 200) -> str:

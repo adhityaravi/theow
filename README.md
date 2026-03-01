@@ -134,6 +134,8 @@ def my_teardown(state: dict, attempt: int, success: bool) -> None:
 
     Args:
         state: Same dict from setup, carrying any data you stored.
+              Set state["suppress_exc"] = False before raising to
+              propagate the exception to the caller.
         attempt: Current attempt number.
         success: True if the retried function succeeded, False otherwise.
     """
@@ -189,7 +191,8 @@ sequenceDiagram
 **Behavior:**
 
 - `setup` raising an exception aborts recovery - the original exception is re-raised.
-- `teardown` errors are logged but never propagated - they cannot break recovery or the consumer pipeline.
+- `teardown` errors are logged but suppressed by default - they cannot break recovery or the consumer pipeline.
+- The teardown can set `state["suppress_exc"] = False` before raising to make the exception propagate to the caller. This lets the teardown intentionally override the recovery outcome, for example to signal that the function was healed but the caller should still see a failure.
 - If no hooks are provided, recovery works exactly as before. Hooks are fully optional.
 
 ### Model Routing
