@@ -19,7 +19,12 @@ from theow._core._logging import get_logger, set_engine_name
 from theow._core._models import Rule
 from theow._core._resolver import Resolver
 from theow._core._stats import meow as _meow
+import logfire as lf
+from pydantic_ai_guardrails.guardrails.input import prompt_injection
+from pydantic_ai_guardrails.guardrails.output import secret_redaction
+
 from theow._gateway import LLMGateway, create_gateway
+from theow._gateway._base import GatewayProvider, LogfireConfig, MiddlewareConfig
 
 logger = get_logger(__name__)
 
@@ -40,6 +45,9 @@ class Theow:
         max_tool_calls_per_session: int = 30,
         max_tokens_per_session: int = 8192,
         archive_llm_attempt: bool = False,
+        gateway_provider: GatewayProvider = GatewayProvider.PYDANTIC,
+        logfire: bool | LogfireConfig = False,
+        middleware: bool | MiddlewareConfig = False,
     ) -> None:
         self._name = name
         set_engine_name(name)
@@ -51,9 +59,13 @@ class Theow:
         self._max_tool_calls_per_session = max_tool_calls_per_session
         self._max_tokens_per_session = max_tokens_per_session
         self._archive_llm_attempt = archive_llm_attempt
+        self._gateway_provider = gateway_provider
 
         self._gateway: LLMGateway | None = None
         self._secondary_gateway: LLMGateway | None = None
+
+        self._init_logfire(logfire)
+        self._middleware = self._resolve_middleware(middleware)
 
         self._setup_directories()
         self._setup_components()
@@ -90,6 +102,7 @@ class Theow:
             max_tool_calls_per_session=self._max_tool_calls_per_session,
             max_tokens_per_session=self._max_tokens_per_session,
             archive_llm_attempt=self._archive_llm_attempt,
+            middleware=self._middleware,
         )
 
         self._mark_decorator = MarkDecorator(
@@ -215,12 +228,40 @@ class Theow:
             logger.warning("Exploration disabled", reason="no LLM configured")
             return
 
-        self._gateway = create_gateway(self._llm)
+        self._gateway = create_gateway(self._llm, provider=self._gateway_provider)
         self._explorer.set_gateway(self._gateway)
 
         if self._llm_secondary:
-            self._secondary_gateway = create_gateway(self._llm_secondary)
+            self._secondary_gateway = create_gateway(
+                self._llm_secondary, provider=self._gateway_provider
+            )
             self._explorer.set_secondary_gateway(self._secondary_gateway)
+
+    def _init_logfire(self, logfire: bool | LogfireConfig) -> None:
+        """Initialise Logfire/OTel instrumentation if requested."""
+        if logfire is True:
+            config = LogfireConfig(enabled=True)
+        elif isinstance(logfire, LogfireConfig):
+            config = logfire
+        else:
+            return
+
+        if not config.enabled:
+            return
+
+        lf.configure(send_to_logfire=config.send_to_logfire)
+        lf.instrument_pydantic_ai()
+
+    def _resolve_middleware(self, middleware: bool | MiddlewareConfig) -> MiddlewareConfig:
+        """Resolve middleware param into a concrete config with sensible defaults."""
+        if middleware is True:
+            return MiddlewareConfig(
+                input_guardrails=[prompt_injection()],
+                output_guardrails=[secret_redaction()],
+            )
+        elif isinstance(middleware, MiddlewareConfig):
+            return middleware
+        return MiddlewareConfig()
 
     def _flush_observation(self, observation: dict) -> None:
         """Append an observation entry to observations.jsonl."""

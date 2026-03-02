@@ -13,6 +13,7 @@ COMPONENT_MAP = {
     "theow._gateway._anthropic": "llm-gateway",
     "theow._gateway._gemini": "llm-gateway",
     "theow._gateway._copilot": "llm-gateway",
+    "theow._gateway._pydantic_ai": "llm-gateway",
     "theow._core._explorer": "explorer",
     "theow._core._resolver": "resolver",
     "theow._core._decorators": "recovery",

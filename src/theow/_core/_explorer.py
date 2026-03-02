@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import stat
@@ -9,6 +10,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
+
+from pydantic_ai_guardrails._guardrails import GuardrailContext
 
 from theow._core._chroma_store import extract_query_text
 from theow._core._logging import get_logger
@@ -35,7 +38,7 @@ from theow._core._tools import (
 if TYPE_CHECKING:
     from theow._core._chroma_store import ChromaStore
     from theow._core._decorators import ActionRegistry, TracingInfo
-    from theow._gateway._base import LLMGateway
+    from theow._gateway._base import LLMGateway, MiddlewareConfig
 
 logger = get_logger(__name__)
 
@@ -57,6 +60,7 @@ class Explorer:
         max_tool_calls_per_session: int = 30,
         max_tokens_per_session: int = 8192,
         archive_llm_attempt: bool = False,
+        middleware: MiddlewareConfig | None = None,
     ) -> None:
         self._chroma = chroma
         self._gateway = gateway
@@ -66,6 +70,7 @@ class Explorer:
         self._max_tool_calls_per_session = max_tool_calls_per_session
         self._max_tokens_per_session = max_tokens_per_session
         self._archive_llm_attempt = archive_llm_attempt
+        self._middleware = middleware
         self._secondary_gateway: LLMGateway | None = None
         self._session_count = 0
         self._session_cache: SessionCache | None = None
@@ -249,6 +254,12 @@ class Explorer:
 
         if hint:
             initial_prompt += f"\n\n## Caller Constraints\n\n{hint}"
+
+        # Input guardrails: check prompt before sending to LLM
+        if self._run_input_guardrails(initial_prompt):
+            logger.warning("Input guardrail triggered, aborting exploration")
+            return None, True
+
         messages = [{"role": "user", "content": initial_prompt}]
 
         logger.info(
@@ -279,6 +290,11 @@ class Explorer:
             allow_escalation=allow_escalation,
             hint=hint,
         )
+
+        # Output guardrails: sanitize LLM responses before they leave the explorer
+        for msg in messages:
+            if msg.get("role") == "assistant" and isinstance(msg.get("content"), str):
+                msg["content"] = self._run_output_guardrails(msg["content"])
 
         # Reset gateway state after conversation ends
         for gw in self._gateways:
@@ -673,6 +689,40 @@ Try a different approach."""
 
     def _extract_query_text(self, context: dict[str, Any]) -> str:
         return extract_query_text(context)
+
+    def _run_input_guardrails(self, prompt: str) -> bool:
+        """Run input guardrails on prompt. Returns True if any triggered (abort)."""
+        if not self._middleware or not self._middleware.input_guardrails:
+            return False
+
+        ctx: GuardrailContext[None] = GuardrailContext(deps=None, prompt=prompt)
+        for guardrail in self._middleware.input_guardrails:
+            result = asyncio.run(guardrail.validate(prompt, ctx))
+            if result.get("tripwire_triggered"):
+                logger.warning(
+                    "Input guardrail triggered",
+                    guardrail=guardrail.name,
+                    message=result.get("message"),
+                )
+                return True
+        return False
+
+    def _run_output_guardrails(self, text: str) -> str:
+        """Run output guardrails on response text. Returns sanitised text."""
+        if not self._middleware or not self._middleware.output_guardrails:
+            return text
+
+        ctx: GuardrailContext[None] = GuardrailContext(deps=None)
+        for guardrail in self._middleware.output_guardrails:
+            result = asyncio.run(guardrail.validate(text, ctx))
+            if result.get("tripwire_triggered"):
+                logger.warning(
+                    "Output guardrail triggered",
+                    guardrail=guardrail.name,
+                    message=result.get("message"),
+                )
+                text = result.get("sanitized", text)
+        return text
 
     def _run_escalation(
         self,
