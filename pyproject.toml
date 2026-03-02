@@ -56,6 +56,7 @@ exclude = ["src/theow/_codegraph/examples/"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+exclude = ["src/theow/_codegraph/examples/"]
 
 [tool.ruff.format]
 quote-style = "double"

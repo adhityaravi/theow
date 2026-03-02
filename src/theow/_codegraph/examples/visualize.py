@@ -19,8 +19,16 @@ EDGE_COLORS = {
     "inherits": "#ff5555",
 }
 
-graph = CodeGraph(root=Path(__file__).resolve().parent.parent.parent.parent.parent / "src" / "theow")
+project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
+
+graph = CodeGraph(root=project_root / "src" / "theow")
 graph.build()
+
+# Add a dependency to demonstrate add_root
+import structlog
+
+structlog_root = Path(structlog.__file__).parent
+graph.add_root(structlog_root)
 
 net = Network(height="100vh", width="100%", directed=True, bgcolor="#282a36", font_color="#f8f8f2")
 net.barnes_hut(gravity=-3000, spring_length=150)

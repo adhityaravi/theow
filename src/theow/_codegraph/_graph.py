@@ -52,6 +52,7 @@ class CodeGraph:
         max_file_size: int = 1_000_000,
     ) -> None:
         self._root = Path(root).resolve()
+        self._roots: list[Path] = [self._root]
         self._excludes = excludes if excludes is not None else set(DEFAULT_EXCLUDES)
         self._max_file_size = max_file_size
         self._built = False
@@ -84,9 +85,10 @@ class CodeGraph:
             self._name_index.clear()
 
         files_parsed = 0
-        for path in self._iter_files():
-            self.build_file(path)
-            files_parsed += 1
+        for root in self._roots:
+            for path in self._iter_files_for_root(root):
+                self._build_file(path, root)
+                files_parsed += 1
 
         resolved, unresolved = self._resolve_edges()
         self._built = True
@@ -99,14 +101,43 @@ class CodeGraph:
             unresolved_refs=unresolved,
         )
 
+    def add_root(self, root: str | Path) -> None:
+        """Add an additional source root (e.g. a dependency) to the graph.
+
+        If the graph is already built, the new root is parsed immediately
+        and edges are re-resolved.
+        """
+        resolved = Path(root).resolve()
+        self._roots.append(resolved)
+
+        if self._built:
+            files_parsed = 0
+            for path in self._iter_files_for_root(resolved):
+                self._build_file(path, resolved)
+                files_parsed += 1
+            resolved_refs, unresolved_refs = self._resolve_edges()
+            logger.info(
+                "Root added to code graph",
+                root=str(resolved),
+                files=files_parsed,
+                nodes=len(self._nodes),
+                edges=self._edge_count(),
+                resolved_refs=resolved_refs,
+                unresolved_refs=unresolved_refs,
+            )
+
     def build_file(self, path: Path) -> None:
         """Parse a single file and add its nodes/edges to the graph."""
+        self._build_file(path, self._root)
+
+    def _build_file(self, path: Path, root: Path) -> None:
+        """Parse a single file relative to a given root."""
         try:
             source = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return
 
-        relative_path = str(path.relative_to(self._root))
+        relative_path = str(path.relative_to(root))
         ext = path.suffix
         visitor = self._ext_map.get(ext)
         if not visitor:
@@ -127,14 +158,19 @@ class CodeGraph:
             self._add_edge(edge.source, edge.target, kind=edge.kind, line=edge.line)
 
     def _iter_files(self):
-        """Walk root directory, yielding files that match visitor extensions."""
-        for path in sorted(self._root.rglob("*")):
+        """Walk all roots, yielding files that match visitor extensions."""
+        for root in self._roots:
+            yield from self._iter_files_for_root(root)
+
+    def _iter_files_for_root(self, root: Path):
+        """Walk a single root directory, yielding matching files."""
+        for path in sorted(root.rglob("*")):
             if not path.is_file():
                 continue
-            if any(part in self._excludes for part in path.parts):
+            if any(part in self._excludes for part in path.relative_to(root).parts):
                 continue
             if path.stat().st_size > self._max_file_size:
-                logger.debug("Skipping large file", file=str(path.relative_to(self._root)))
+                logger.debug("Skipping large file", file=str(path.relative_to(root)))
                 continue
             if path.suffix in self._ext_map:
                 yield path
@@ -166,7 +202,7 @@ class CodeGraph:
         return resolved_count, len(edges_to_resolve) - resolved_count
 
     def _resolve_name(self, name: str, context_id: str) -> str | None:
-        """Resolve a short name to a node ID, preferring same-file matches."""
+        """Resolve a short name to a node ID, preferring same-file then same-root."""
         # For attribute access like "self.method" or "obj.method", use the last part
         short = name.rsplit(".", 1)[-1] if "." in name else name
 
@@ -176,11 +212,21 @@ class CodeGraph:
         if len(candidates) == 1:
             return candidates[0]
 
-        # Prefer same-file
         context_file = self._nodes[context_id].file if context_id in self._nodes else ""
+
+        # Prefer same-file
         for cid in candidates:
             if cid in self._nodes and self._nodes[cid].file == context_file:
                 return cid
+
+        # Prefer same-root (files sharing a common path prefix)
+        if context_file:
+            context_parts = Path(context_file).parts
+            for cid in candidates:
+                if cid in self._nodes:
+                    cid_parts = Path(self._nodes[cid].file).parts
+                    if context_parts and cid_parts and context_parts[0] == cid_parts[0]:
+                        return cid
 
         return candidates[0]
 
