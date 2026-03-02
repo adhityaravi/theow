@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.22](https://github.com/adhityaravi/theow/compare/theow-v0.0.21...theow-v0.0.22) (2026-03-02)
+
+
+### Features
+
+* **codegraph:** adds multi root support ([4096423](https://github.com/adhityaravi/theow/commit/4096423368f838216c2e41ddf201fa4552e7c356))
+
+
+### Bug Fixes
+
+* **codegraph:** move examples out of the installable ([8df6c13](https://github.com/adhityaravi/theow/commit/8df6c1330d0f6dfd7c36dfca8bdfc2105c51e1ec))
+
 ## [0.0.21](https://github.com/adhityaravi/theow/compare/theow-v0.0.20...theow-v0.0.21) (2026-03-01)
 
 
