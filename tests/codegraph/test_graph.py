@@ -123,9 +123,7 @@ def test_search_definition_by_file_line(theow_src):
     rule_node = graph._nodes.get("_core/_models.py::Rule")
     assert rule_node is not None
 
-    results = graph.search_code(
-        scope="definition", file="_core/_models.py", line=rule_node.line
-    )
+    results = graph.search_code(scope="definition", file="_core/_models.py", line=rule_node.line)
     assert len(results) > 0
     assert results[0]["name"] == "Rule"
 
@@ -136,9 +134,7 @@ def test_search_path(theow_src):
     graph.build()
 
     # _core/_models.py module contains Rule class
-    results = graph.search_code(
-        query="_core/_models.py", scope="path", target="Rule"
-    )
+    results = graph.search_code(query="_core/_models.py", scope="path", target="Rule")
     # Should find a path (module --contains--> Rule)
     assert len(results) >= 2
 

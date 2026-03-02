@@ -6,7 +6,7 @@ from pathlib import Path
 from theow._codegraph._visitors._go import GoVisitor
 from theow._codegraph._visitors._python import PythonVisitor
 
-GO_SOURCE = '''\
+GO_SOURCE = """\
 package main
 
 import (
@@ -44,7 +44,7 @@ func main() {
 \tfmt.Println(dog.Speak())
 \tfmt.Println(dog.Fetch("ball"))
 }
-'''
+"""
 
 
 def test_python_visitor_parses_models(theow_src):
