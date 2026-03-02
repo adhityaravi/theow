@@ -7,9 +7,9 @@ Tree-sitter based code structure graph for Theow's LLM explorer. Instead of read
 </div>
 
 <div align="center">
-<img src="examples/theow_graph.png" alt="Theow CodeGraph" width="500">
+<img src="../../../assets/codegraph/theow_graph.png" alt="Theow CodeGraph" width="500">
 <br>
-<sub>Theow's own code graph — generated with <a href="examples/visualize.py">examples/visualize.py</a></sub>
+<sub>Theow's own code graph — generated with <a href="../../../assets/codegraph/visualize.py">assets/codegraph/visualize.py</a></sub>
 </div>
 
 ## Install

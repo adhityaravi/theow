@@ -1,4 +1,4 @@
-"""Visualize theow's code graph with pyvis. Run: uv run --extra codegraph src/theow/_codegraph/examples/visualize.py"""
+"""Visualize theow's code graph with pyvis. Run: uv run --extra codegraph --with pyvis assets/codegraph/visualize.py"""
 
 from pathlib import Path
 
@@ -19,7 +19,7 @@ EDGE_COLORS = {
     "inherits": "#ff5555",
 }
 
-project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
+project_root = Path(__file__).resolve().parent.parent.parent
 
 graph = CodeGraph(root=project_root / "src" / "theow")
 graph.build()
