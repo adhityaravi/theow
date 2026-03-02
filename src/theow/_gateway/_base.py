@@ -5,12 +5,37 @@ from __future__ import annotations
 import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Callable
 
 from theow._core._logging import get_logger
 from theow._core._tools import ExplorationSignal
 
 logger = get_logger(__name__)
+
+
+class GatewayProvider(str, Enum):
+    """Which backend routes LLM calls."""
+
+    PYDANTIC = "pydantic"
+    NATIVE = "native"
+
+
+@dataclass
+class LogfireConfig:
+    """Configuration for Logfire/OpenTelemetry instrumentation."""
+
+    enabled: bool = False
+    send_to_logfire: bool = True  # False = OTel-only via OTEL_* env vars
+
+
+@dataclass
+class MiddlewareConfig:
+    """Configuration for request/response middleware (guardrails, future governance)."""
+
+    input_guardrails: list[Any] | None = None  # default: [prompt_injection()]
+    output_guardrails: list[Any] | None = None  # default: [secret_redaction()]
+
 
 # Type mapping for JSON schema generation
 TYPE_MAP = {
