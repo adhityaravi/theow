@@ -59,13 +59,9 @@ class PythonVisitor:
             elif child.type == "decorated_definition":
                 for inner in child.children:
                     if inner.type == "function_definition":
-                        self._extract_function(
-                            inner, parent_id, relative_path, nodes, edges
-                        )
+                        self._extract_function(inner, parent_id, relative_path, nodes, edges)
                     elif inner.type == "class_definition":
-                        self._extract_class(
-                            inner, parent_id, relative_path, nodes, edges
-                        )
+                        self._extract_class(inner, parent_id, relative_path, nodes, edges)
             elif child.type == "class_definition":
                 self._extract_class(child, parent_id, relative_path, nodes, edges)
             elif child.type == "import_statement":

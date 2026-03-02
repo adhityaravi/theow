@@ -40,9 +40,7 @@ def load_visitors(languages: list[str]) -> list[LanguageVisitor]:
     for lang in languages:
         entry = BUILTIN_VISITORS.get(lang)
         if entry is None:
-            raise ValueError(
-                f"Unknown language: {lang!r}. Available: {sorted(BUILTIN_VISITORS)}"
-            )
+            raise ValueError(f"Unknown language: {lang!r}. Available: {sorted(BUILTIN_VISITORS)}")
         module_path, class_name = entry
         module = importlib.import_module(module_path)
         cls = getattr(module, class_name)
