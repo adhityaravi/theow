@@ -201,6 +201,26 @@ class Theow:
         """Get all registered tools as a list."""
         return list(self._tool_registry.get_all().values())
 
+    def run(
+        self,
+        prompt: str,
+        tools: list[Callable[..., Any]] | None = None,
+        max_tool_calls: int = 30,
+        max_tokens: int = 8192,
+    ) -> bool:
+        """Run a one-shot LLM conversation with tools.
+
+        Give it a prompt and tools, theow handles the conversation loop.
+        Returns True if the LLM signaled Done, False otherwise.
+        """
+        self._ensure_gateway()
+        all_tools = tools if tools is not None else self.get_tools()
+        budget = {
+            "max_tool_calls_per_session": max_tool_calls,
+            "max_tokens_per_session": max_tokens,
+        }
+        return self._explorer.run_direct(prompt=prompt, tools=all_tools, budget=budget)
+
     def explore(
         self,
         context: dict[str, Any],
