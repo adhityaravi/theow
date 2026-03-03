@@ -5,6 +5,13 @@ description = "LLM-in-the-loop rule based expert system"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12,<3.14"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "chromadb>=0.4",
     "pydantic>=2.0",
