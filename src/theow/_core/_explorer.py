@@ -44,11 +44,7 @@ logger = get_logger(__name__)
 
 
 class Explorer:
-    """Conversational LLM exploration for novel situations.
-
-    The Explorer runs sync at the moment. Conversations are kept blocking.
-    TODO: Move to a fully async design. LOL.
-    """
+    """Conversational LLM exploration for novel situations."""
 
     def __init__(
         self,

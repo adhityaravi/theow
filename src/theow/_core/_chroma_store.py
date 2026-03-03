@@ -32,7 +32,6 @@ def extract_query_text(context: dict[str, Any], max_chars: int = 800) -> str:
     return longest
 
 
-# TODO: explore other available providers or maybe not.
 _embedding_function = ONNXMiniLM_L6_V2(preferred_providers=["CPUExecutionProvider"])
 
 
@@ -42,10 +41,8 @@ class ChromaStore:
     def __init__(
         self,
         path: Path,
-        embedding_model: str = "all-MiniLM-L6-v2",
     ) -> None:
         self._path = path
-        self._embedding_model = embedding_model
 
         path.mkdir(parents=True, exist_ok=True)
 
@@ -154,18 +151,6 @@ class ChromaStore:
 
         self.index_rule(rule)
         return rule
-
-    def get_rule(self, collection: str, name: str) -> Rule | None:
-        """Get a rule by name from a collection."""
-        coll = self._get_collection(collection)
-        result = coll.get(ids=[name], include=["documents", "metadatas"])
-
-        if not result["ids"]:
-            return None
-
-        # We don't store full rule YAML in Chroma, only embeddings
-        # Rules must be loaded from files. this just confirms existence
-        return None
 
     def query_rules(
         self,

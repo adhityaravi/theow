@@ -226,11 +226,3 @@ def test_update_rule_stats_nonexistent_rule(temp_dir):
     store = ChromaStore(path=temp_dir / "chroma")
     # Should not raise on nonexistent rule
     store.update_rule_stats("default", "ghost_rule", success=True)
-
-
-def test_get_rule_returns_none(temp_dir):
-    """get_rule always returns None (rules loaded from files, not chroma)."""
-    store = ChromaStore(path=temp_dir / "chroma")
-    rule = Rule(name="r1", description="Test", when=[])
-    store.index_rule(rule)
-    assert store.get_rule("default", "r1") is None
