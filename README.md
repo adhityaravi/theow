@@ -13,7 +13,7 @@
 
 ---
 
-Theow is a programmatic LLM agent that auto-heals failing Python functions on the fly. Wrap any function with `@theow.mark()`, and when it fails, theow handles the rest. Zero prompt engineering. Zero code changes beyond the decorator.
+Theow is a programmatic LLM agent that auto-heals failing Python functions at runtime. Wrap any function with `@theow.mark()`, and when it raises, theow intercepts the exception, diagnoses it, and retries transparently. Zero prompt engineering. Zero code changes beyond the decorator.
 
 ```python
 from theow import Theow
@@ -48,7 +48,7 @@ flowchart LR
 
 ### Layer 1: Conversational agent
 
-At its core, theow is a convenience wrapper around [PydanticAI](https://ai.pydantic.dev/) and the [GitHub Copilot SDK](https://github.com/features/copilot). You give it a prompt, a set of [tools](docs/tools.md), and a token/call budget. Theow runs a conversation loop with the LLM, executing tool calls until the task is done or budget runs out.
+Theow wraps [PydanticAI](https://ai.pydantic.dev/) and the [GitHub Copilot SDK](https://github.com/features/copilot) into a single interface. Give it a prompt, a set of [tools](docs/tools.md), and a token/call budget. Theow runs a conversation loop with the LLM, executing tool calls until the task is done or budget runs out.
 
 ```python
 agent = Theow(llm="anthropic/claude-sonnet-4-20250514")
@@ -58,13 +58,13 @@ agent.tool()(run_command)
 agent.run("Fix the broken config file in ./config/", tools=agent.get_tools())
 ```
 
-PydanticAI can do this on its own. Theow wraps it into a simpler API, adds a unified interface across 15+ providers plus the Copilot SDK (which is a different protocol entirely), and manages the conversation loop with [signals, budget tracking, and nudging](docs/architecture.md). You can optionally enable [middleware](docs/middleware.md) for guardrails on LLM input/output and Logfire for OpenTelemetry instrumentation. But the real value of theow comes from the next two layers.
+PydanticAI can do this on its own. Theow wraps it into a simpler API, adds a unified interface across the PydanticAI providers (15+) and the Copilot SDK (which is a different protocol entirely), and manages a custom conversation loop with [signals, budget tracking, and nudging](docs/architecture.md). You can optionally enable [middleware](docs/middleware.md) for guardrails on LLM input/output and [Logfire](docs/configuration.md#logfire--opentelemetry) for OpenTelemetry instrumentation. The next two layers are where theow diverges from plain LLM wrappers.
 
 ### Layer 2: Explorer
 
-Theow started as a project to self-heal workflow processes. The explorer is the component that makes this work. Feed it an error context and it automatically diagnoses the problem using internal prompts and whatever tools you've registered. No prompt engineering required.
+The explorer takes an error context and diagnoses the problem using internal prompts and whatever tools you've registered. No prompt engineering required.
 
-But the explorer doesn't stop at finding a fix. It converts the LLM's solution into a rule-action pair: a [YAML rule](docs/rules-and-actions.md) that pattern-matches the error, bound to a Python action that fixes it. This pair acts as theow's memory. See [how exploration works](docs/exploration.md) for the full flow.
+Beyond finding a fix, the explorer converts the LLM's solution into a rule-action pair: a [YAML rule](docs/rules-and-actions.md) that pattern-matches the error, paired with a Python action that fixes it. These pairs persist to disk and get indexed in ChromaDB for retrieval. Remote store support is planned. See [how exploration works](docs/exploration.md) for the full flow.
 
 ```python
 agent = Theow(llm="anthropic/claude-sonnet-4-20250514")
@@ -84,7 +84,7 @@ See [`explore()` API reference](docs/configuration.md#theowexplorecontext-tools-
 
 ### Layer 3: Resolver
 
-The resolver is what makes theow fast. Before calling the LLM, it checks if a matching rule already exists, first by explicit name/tag filtering, then by semantic search over the rule database. If a rule matches, its action runs immediately. No LLM call, no tokens spent.
+The resolver checks if a matching rule already exists before calling the LLM. It tries explicit name/tag filtering first, then semantic search over the rule database. If a rule matches, its action runs immediately. No LLM call, no tokens spent.
 
 ```python
 agent = Theow(theow_dir=".theow")

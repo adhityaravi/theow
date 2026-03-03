@@ -6,7 +6,7 @@ The `Theow` constructor accepts all engine-level settings:
 
 ```python
 from theow import Theow
-from theow._gateway._base import GatewayProvider, LogfireConfig, MiddlewareConfig
+from theow import GatewayProvider, LogfireConfig, MiddlewareConfig
 
 agent = Theow(
     theow_dir=".theow",                     # working directory
@@ -36,7 +36,7 @@ The `llm` parameter uses `provider/model` format. The factory splits on the firs
 | `bedrock/anthropic.claude-v3` | PydanticAIGateway | Translates to `bedrock:anthropic.claude-v3` |
 | `copilot/gpt-5.3-codex` | CopilotGateway | Always uses native Copilot SDK |
 
-Any provider PydanticAI supports works out of the box. Gemini has an alias (`gemini` -> `google-gla`) since theow uses `gemini/` while PydanticAI uses `google-gla:`.
+Any provider PydanticAI supports works with no extra configuration. Gemini has an alias (`gemini` -> `google-gla`) since theow uses `gemini/` while PydanticAI uses `google-gla:`.
 
 ### API Keys
 
@@ -54,7 +54,7 @@ No key configuration in code. Set the env var and go.
 ### Gateway Provider
 
 ```python
-from theow._gateway._base import GatewayProvider
+from theow import GatewayProvider
 ```
 
 | Value | Behaviour |
@@ -253,7 +253,7 @@ rule = agent.explore(context, tools=agent.get_tools())
 | `collection` | `str` | `"default"` | ChromaDB collection for rule storage |
 | `tracing` | `TracingInfo` | `None` | Python traceback and exception info |
 
-Returns a `Rule` if exploration produced one, `None` otherwise. The returned rule is ephemeral and unverified — execute it and re-run the failing operation to validate.
+Returns a `Rule` if exploration produced one, `None` otherwise. The returned rule is ephemeral and unverified. Execute it and re-run the failing operation to validate.
 
 ### `Theow.resolve(context, ...) -> Rule | None`
 

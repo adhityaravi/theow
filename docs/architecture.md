@@ -2,7 +2,9 @@
 
 ![Theow Workflow](../assets/theow.excalidraw.svg)
 
-Theow is organized in three layers: the **engine** (`Theow`), the **explorer** (`Explorer`), and the **gateway** (`LLMGateway` implementations). Each layer has a distinct responsibility, and they compose together through dependency injection.
+Theow is an LLM-powered inference engine built on the [production rule system](https://en.wikipedia.org/wiki/Production_system_(computer_science)) pattern: a set of `if-then` rules evaluated against a working memory of facts. In classical expert systems (OPS5, CLIPS, Drools), rules are hand-authored. Theow extends this by using an LLM to generate rules at runtime when no existing rule matches, then caching them for deterministic reuse. The resolver is the forward-chaining matcher, the explorer is the rule acquisition mechanism, and the gateway is the LLM interface.
+
+The core components are: **`Theow`** (entry point, owns `.theow/` directory, ChromaStore, ActionRegistry, Resolver, Explorer), **`Explorer`** (multi-session LLM orchestration, signal dispatch, guardrails), **`Resolver`** (deterministic rule matching by name, tag, and vector search), and **`LLMGateway`** (provider-agnostic conversation loop, tool execution, budget tracking). They compose through dependency injection. The engine constructs everything and wires gateways lazily via `_ensure_gateway()`.
 
 ## The Conversation Loop
 
@@ -89,10 +91,12 @@ The base class provides shared helpers: `check_budget_warning()`, `_build_tool_m
 
 **Gateway factory.** `create_gateway("provider/model")` parses the spec and routes: `copilot/*` always uses `CopilotGateway`, `GatewayProvider.NATIVE` routes to native gateways, `GatewayProvider.PYDANTIC` (default) translates `"provider/model"` to `"provider:model"` with alias mapping (e.g. `gemini` -> `google-gla`).
 
-## How the Three Layers Connect
+## Component Responsibilities
 
-**Engine (Theow).** Entry point. Owns the `.theow/` directory structure, ChromaStore, ActionRegistry, Resolver, and Explorer. Lazily creates the gateway via `_ensure_gateway()`. Passes configuration (session limits, budgets, middleware) down to the Explorer at construction time.
+**Engine (`Theow`).** Entry point. Owns `.theow/` directory structure, ChromaStore, ActionRegistry, Resolver, Explorer. Lazily creates gateways via `_ensure_gateway()`. Passes configuration (session limits, budgets, middleware) down to Explorer at construction time.
 
-**Explorer.** Orchestrates multi-session LLM exploration: checks session cache, queries Chroma, assembles tool sets (signal + search + ephemeral + validation + augmentation + caller-provided), builds the initial prompt, runs guardrails, calls `_converse()`, dispatches signals via `_handle_signal()`, and resets gateways. Also supports `run_direct()` mode for probabilistic rules (simpler signal set, returns boolean).
+**Resolver.** Matches error context against rules. Resolution order: explicit rule names, tag-based filtering, ChromaDB vector search fallback. Returns a bound `Rule` ready for execution. No LLM calls.
 
-**Gateway.** Lowest layer. Responsible for a single conversation session: provider API interaction, tool execution loop, text nudging, budget warnings, signal propagation. Stateless in most implementations (state lives in the message list). Gemini and Copilot are exceptions with internal state cleaned up in `reset()`.
+**Explorer.** Orchestrates multi-session LLM exploration: checks session cache, queries Chroma, assembles tool sets (signal + search + ephemeral + validation + augmentation + caller-provided), builds the initial prompt, runs guardrails, calls `_converse()`, dispatches signals via `_handle_signal()`, resets gateways. Also supports `run_direct()` mode for probabilistic rules (simpler signal set, returns boolean).
+
+**Gateway.** Responsible for a single conversation session: provider API interaction, tool execution loop, text nudging, budget warnings, signal propagation. Stateless in most implementations (state lives in the message list). Copilot is the exception with internal state cleaned up in `reset()`.

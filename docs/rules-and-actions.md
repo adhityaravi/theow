@@ -2,6 +2,8 @@
 
 Rules are YAML files that pattern-match error contexts. Actions are Python functions that fix them. Together they form theow's memory: once the LLM solves a problem, the rule-action pair fires instantly next time.
 
+Theow's rule system is a [production rule system](https://en.wikipedia.org/wiki/Production_system_(computer_science)), the same `if-then` pattern used in classical expert systems like OPS5, CLIPS, and Drools. The `when`/`then` contract is inspired by [Gherkin syntax](https://cucumber.io/docs/gherkin/reference/) from BDD: `when` declares the conditions under which a rule fires, `then` declares the actions to execute. Rules can be hand-authored or generated autonomously by the LLM during exploration.
+
 ## Rule Format
 
 ```yaml
@@ -117,7 +119,7 @@ def install_package(package: str) -> dict:
 
 Actions are discovered on startup from `.theow/actions/*.py`. The decorator name (`"install_package"`) is what rules reference in `then.action`.
 
-Actions should do one atomic fix and return. Do not run verification or rebuild commands inside the action — the recovery loop handles that.
+Actions should do one atomic fix and return. Do not run verification or rebuild commands inside the action. The recovery loop handles that.
 
 ## Programmatic Actions
 
