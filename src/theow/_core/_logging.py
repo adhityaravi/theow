@@ -43,7 +43,16 @@ def _ensure_configured() -> None:
         return
     _CONFIGURED = True
 
-    for noisy in ("httpx", "httpcore", "anthropic", "chromadb", "asyncio"):
+    for noisy in (
+        "httpx",
+        "httpcore",
+        "urllib3",
+        "anthropic",
+        "chromadb",
+        "asyncio",
+        "opentelemetry",
+        "logfire",
+    ):
         logging.getLogger(noisy).setLevel(logging.ERROR)
 
     # Only configure if host app hasn't set up structlog

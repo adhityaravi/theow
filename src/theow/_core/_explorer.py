@@ -11,10 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+import logfire
 from pydantic_ai_guardrails._guardrails import GuardrailContext
 
 from theow._core._chroma_store import extract_query_text
-from theow._core._logging import get_logger
+from theow._core._logging import get_engine_name, get_logger
 from theow._core._models import Rule
 from theow._core._prompts import ERROR, INTRO, TEMPLATES
 from theow._core._session_cache import SessionCache
@@ -137,25 +138,34 @@ class Explorer:
 
         self._session_count += 1
 
-        locked = self._lock_permanent_files()
-        try:
-            rule, explored = self._run_conversation(
-                context,
-                tools,
-                collection,
-                tracing,
-                rejected_attempts,
-                attempt_number,
-                hint,
-                allow_escalation=allow_escalation,
-            )
-        finally:
-            self._unlock_permanent_files(locked)
+        span_attrs: dict[str, Any] = {
+            "attempt": attempt_number,
+            "collection": collection,
+        }
+        if tracing:
+            span_attrs["error_type"] = tracing.exception_type
+            span_attrs["error_message"] = tracing.exception_message[:200]
 
-        if rule:
-            self._session_cache.store(context, rule)
+        with logfire.span(f"{get_engine_name()} exploration", **span_attrs):
+            locked = self._lock_permanent_files()
+            try:
+                rule, explored = self._run_conversation(
+                    context,
+                    tools,
+                    collection,
+                    tracing,
+                    rejected_attempts,
+                    attempt_number,
+                    hint,
+                    allow_escalation=allow_escalation,
+                )
+            finally:
+                self._unlock_permanent_files(locked)
 
-        return rule, explored
+            if rule:
+                self._session_cache.store(context, rule)
+
+            return rule, explored
 
     def _lock_permanent_files(self) -> dict[Path, int]:
         """Make permanent rule/action files read-only during exploration."""
@@ -258,9 +268,12 @@ class Explorer:
 
         messages = [{"role": "user", "content": initial_prompt}]
 
+        gw = self._gateway
         logger.info(
             "Starting LLM conversation",
             session=f"{self._session_count}/{self._session_limit}",
+            gateway=gw.gateway_name if gw else "none",
+            model=gw.model_name if gw else "none",
             prompt_tokens_est=len(initial_prompt) // 4,
             tools=len(all_tools),
         )
@@ -777,6 +790,25 @@ Try a different approach."""
         can_escalate = allow_escalation and self._secondary_gateway is not None
         caller_tools = make_direct_fix_tools(self._rules_dir) + tools
 
+        with logfire.span(f"{get_engine_name()} run"):
+            return self._run_direct_inner(
+                prompt,
+                tools,
+                caller_tools,
+                budget,
+                can_escalate,
+                escalation_context,
+            )
+
+    def _run_direct_inner(
+        self,
+        prompt: str,
+        tools: list[Callable[..., Any]],
+        caller_tools: list[Callable[..., Any]],
+        budget: dict[str, Any],
+        can_escalate: bool,
+        escalation_context: str | None,
+    ) -> bool:
         # Auto-escalation: skip primary, go straight to secondary
         if escalation_context and self._secondary_gateway is not None:
             logger.info("Auto-escalating to secondary model")

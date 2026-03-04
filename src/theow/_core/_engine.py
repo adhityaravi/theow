@@ -19,12 +19,12 @@ from theow._core._logging import get_logger, set_engine_name
 from theow._core._models import Rule
 from theow._core._resolver import Resolver
 from theow._core._stats import meow as _meow
-import logfire as lf
 from pydantic_ai_guardrails.guardrails.input import prompt_injection
 from pydantic_ai_guardrails.guardrails.output import secret_redaction
 
 from theow._gateway import LLMGateway, create_gateway
-from theow._gateway._base import GatewayProvider, LogfireConfig, MiddlewareConfig
+from theow._gateway._base import GatewayProvider, MiddlewareConfig
+from theow._gateway._observability import LogfireConfig, configure_logfire
 
 logger = get_logger(__name__)
 
@@ -45,7 +45,7 @@ class Theow:
         max_tool_calls_per_session: int = 30,
         max_tokens_per_session: int = 8192,
         archive_llm_attempt: bool = False,
-        gateway_provider: GatewayProvider = GatewayProvider.PYDANTIC,
+        _gateway_provider: GatewayProvider = GatewayProvider.PYDANTIC,
         logfire: bool | LogfireConfig = False,
         middleware: bool | MiddlewareConfig = False,
     ) -> None:
@@ -59,7 +59,7 @@ class Theow:
         self._max_tool_calls_per_session = max_tool_calls_per_session
         self._max_tokens_per_session = max_tokens_per_session
         self._archive_llm_attempt = archive_llm_attempt
-        self._gateway_provider = gateway_provider
+        self._gateway_provider = _gateway_provider
 
         self._gateway: LLMGateway | None = None
         self._secondary_gateway: LLMGateway | None = None
@@ -266,11 +266,7 @@ class Theow:
         else:
             return
 
-        if not config.enabled:
-            return
-
-        lf.configure(send_to_logfire=config.send_to_logfire)
-        lf.instrument_pydantic_ai()
+        configure_logfire(config, self._name)
 
     def _resolve_middleware(self, middleware: bool | MiddlewareConfig) -> MiddlewareConfig:
         """Resolve middleware param into a concrete config with sensible defaults."""
