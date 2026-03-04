@@ -87,7 +87,7 @@ agent = Theow(llm="...", logfire=True)
 agent = Theow(llm="...", logfire=LogfireConfig(enabled=True, send_to_logfire=False))
 ```
 
-When enabled, this calls `logfire.configure()` and `logfire.instrument_pydantic_ai()` to get automatic spans for every LLM call.
+When enabled, every LLM call gets a logfire span with `gen_ai.*` semantic convention attributes, per-tool-call child spans, token usage, and cost tracking. See [observability](observability.md) for the full span structure and cost computation details.
 
 ### Middleware
 
