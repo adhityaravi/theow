@@ -8,12 +8,13 @@
 [![Python](https://img.shields.io/pypi/pyversions/theow)](https://pypi.org/project/theow/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![PydanticAI](https://img.shields.io/badge/built%20with-PydanticAI-6F42C1)](https://ai.pydantic.dev/)
+[![Logfire](https://img.shields.io/badge/observable%20with-Logfire-F97316)](https://logfire.pydantic.dev/)
 
 </div>
 
 ---
 
-Theow is a programmatic LLM agent that auto-heals failing Python functions at runtime. Wrap any function with `@theow.mark()`, and when it raises, theow intercepts the exception, diagnoses it, and retries transparently. Zero prompt engineering. Zero code changes beyond the decorator.
+Theow is an observable, programmatic LLM agent that auto-heals failing Python functions at runtime. Wrap any function with `@theow.mark()`, and when it raises, theow intercepts the exception, diagnoses it, and retries transparently. Every LLM call, tool execution, and token spend is [traced via OpenTelemetry](docs/observability.md). Zero prompt engineering. Zero code changes beyond the decorator.
 
 ```python
 from theow import Theow
