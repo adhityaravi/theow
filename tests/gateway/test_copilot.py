@@ -37,7 +37,7 @@ def test_copilot_gateway_reset():
 def test_copilot_handle_tool_call_success():
     with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
         from theow._gateway._copilot import CopilotGateway
-        from theow._gateway._base import SessionState
+        from theow._gateway._observability import SessionState
 
         gateway = CopilotGateway()
         gateway._state = SessionState()
@@ -56,7 +56,7 @@ def test_copilot_handle_tool_call_success():
 def test_copilot_handle_tool_call_budget_exceeded():
     with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
         from theow._gateway._copilot import CopilotGateway
-        from theow._gateway._base import SessionState
+        from theow._gateway._observability import SessionState
 
         gateway = CopilotGateway()
         gateway._state = SessionState(tool_calls=31)
@@ -71,7 +71,7 @@ def test_copilot_handle_tool_call_budget_exceeded():
 def test_copilot_handle_tool_call_token_budget_exceeded():
     with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
         from theow._gateway._copilot import CopilotGateway
-        from theow._gateway._base import SessionState
+        from theow._gateway._observability import SessionState
 
         gateway = CopilotGateway()
         gateway._state = SessionState(tool_calls=1, tokens_used=9000)
@@ -83,10 +83,11 @@ def test_copilot_handle_tool_call_token_budget_exceeded():
         assert "Session budget exceeded" in result["textResultForLlm"]
 
 
-def test_copilot_handle_tool_call_estimates_tokens():
+def test_copilot_handle_tool_call_does_not_estimate_tokens():
+    """Token tracking comes from SDK ASSISTANT_USAGE events, not from handle_tool_call."""
     with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
         from theow._gateway._copilot import CopilotGateway
-        from theow._gateway._base import SessionState
+        from theow._gateway._observability import SessionState
 
         gateway = CopilotGateway()
         gateway._state = SessionState()
@@ -95,13 +96,14 @@ def test_copilot_handle_tool_call_estimates_tokens():
 
         invocation = {"arguments": {"data": "x" * 400}, "tool_name": "echo"}
         gateway._handle_tool_call(lambda data: data, invocation)
-        assert gateway._state.tokens_used > 0
+        assert gateway._state.tokens_used == 0
+        assert gateway._state.tool_calls == 1
 
 
 def test_copilot_handle_tool_call_request_templates_with_config(tmp_path):
     with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
         from theow._gateway._copilot import CopilotGateway
-        from theow._gateway._base import SessionState
+        from theow._gateway._observability import SessionState
 
         gateway = CopilotGateway()
         gateway._state = SessionState()
@@ -122,7 +124,7 @@ def test_copilot_handle_tool_call_request_templates_with_config(tmp_path):
 def test_copilot_handle_tool_call_request_templates_no_config():
     with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
         from theow._gateway._copilot import CopilotGateway
-        from theow._gateway._base import SessionState
+        from theow._gateway._observability import SessionState
 
         gateway = CopilotGateway()
         gateway._state = SessionState()
@@ -141,7 +143,7 @@ def test_copilot_handle_tool_call_request_templates_no_config():
 def test_copilot_handle_tool_call_other_signal():
     with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
         from theow._gateway._copilot import CopilotGateway
-        from theow._gateway._base import SessionState
+        from theow._gateway._observability import SessionState
 
         gateway = CopilotGateway()
         gateway._state = SessionState()
@@ -160,7 +162,7 @@ def test_copilot_handle_tool_call_other_signal():
 def test_copilot_handle_tool_call_exception():
     with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
         from theow._gateway._copilot import CopilotGateway
-        from theow._gateway._base import SessionState
+        from theow._gateway._observability import SessionState
 
         gateway = CopilotGateway()
         gateway._state = SessionState()
@@ -179,7 +181,7 @@ def test_copilot_handle_tool_call_exception():
 def test_copilot_handle_tool_call_budget_warning():
     with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
         from theow._gateway._copilot import CopilotGateway
-        from theow._gateway._base import SessionState
+        from theow._gateway._observability import SessionState
 
         gateway = CopilotGateway()
         gateway._state = SessionState(tool_calls=23)
