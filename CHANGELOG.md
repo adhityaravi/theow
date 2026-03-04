@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.0](https://github.com/adhityaravi/theow/compare/theow-v0.0.22...theow-v0.1.0) (2026-03-04)
+
+
+### Features
+
+* pydanticai ([#27](https://github.com/adhityaravi/theow/issues/27)) ([f3b7cd6](https://github.com/adhityaravi/theow/commit/f3b7cd6793405406b66d1e11c97e4d38c6af85d2))
+
 ## [0.0.22](https://github.com/adhityaravi/theow/compare/theow-v0.0.21...theow-v0.0.22) (2026-03-02)
 
 
