@@ -313,7 +313,11 @@ class CodeGraph:
                 continue
             if file and node.file != file:
                 continue
-            if query and query.lower() not in node.name.lower() and query.lower() not in node_id.lower():
+            if (
+                query
+                and query.lower() not in node.name.lower()
+                and query.lower() not in node_id.lower()
+            ):
                 continue
             relevance = "exact" if node.name == query else "substring"
             results.append(SearchResult(node=node, relevance=relevance))

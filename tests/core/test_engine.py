@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from theow._core._engine import Theow
+from theow._gateway._base import GatewayProvider
 
 
 def _make_theow(tmp_path, llm=None):
@@ -85,7 +86,7 @@ def test_engine_ensure_gateway_with_llm(tmp_path):
             )
 
     assert theow._gateway is mock_gw
-    mock_create.assert_called_with("anthropic/claude-sonnet-4")
+    mock_create.assert_called_with("anthropic/claude-sonnet-4", provider=GatewayProvider.PYDANTIC)
 
 
 def test_engine_meow(tmp_path):

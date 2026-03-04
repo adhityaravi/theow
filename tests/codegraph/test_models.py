@@ -36,8 +36,15 @@ def test_node_to_dict_full():
 
 def test_node_roundtrip():
     node = Node(
-        id="a.py::X", kind="class", name="X", file="a.py", line=1,
-        end_line=20, signature="", docstring="A class.", parent="a.py",
+        id="a.py::X",
+        kind="class",
+        name="X",
+        file="a.py",
+        line=1,
+        end_line=20,
+        signature="",
+        docstring="A class.",
+        parent="a.py",
     )
     assert Node.from_dict(node.to_dict()) == node
 

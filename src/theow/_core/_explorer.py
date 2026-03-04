@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import stat
@@ -10,8 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+import logfire
+from pydantic_ai_guardrails._guardrails import GuardrailContext
+
 from theow._core._chroma_store import extract_query_text
-from theow._core._logging import get_logger
+from theow._core._logging import get_engine_name, get_logger
 from theow._core._models import Rule
 from theow._core._prompts import ERROR, INTRO, TEMPLATES
 from theow._core._session_cache import SessionCache
@@ -35,17 +39,13 @@ from theow._core._tools import (
 if TYPE_CHECKING:
     from theow._core._chroma_store import ChromaStore
     from theow._core._decorators import ActionRegistry, TracingInfo
-    from theow._gateway._base import LLMGateway
+    from theow._gateway._base import LLMGateway, MiddlewareConfig
 
 logger = get_logger(__name__)
 
 
 class Explorer:
-    """Conversational LLM exploration for novel situations.
-
-    The Explorer runs sync at the moment. Conversations are kept blocking.
-    TODO: Move to a fully async design. LOL.
-    """
+    """Conversational LLM exploration for novel situations."""
 
     def __init__(
         self,
@@ -57,6 +57,7 @@ class Explorer:
         max_tool_calls_per_session: int = 30,
         max_tokens_per_session: int = 8192,
         archive_llm_attempt: bool = False,
+        middleware: MiddlewareConfig | None = None,
     ) -> None:
         self._chroma = chroma
         self._gateway = gateway
@@ -66,6 +67,7 @@ class Explorer:
         self._max_tool_calls_per_session = max_tool_calls_per_session
         self._max_tokens_per_session = max_tokens_per_session
         self._archive_llm_attempt = archive_llm_attempt
+        self._middleware = middleware
         self._secondary_gateway: LLMGateway | None = None
         self._session_count = 0
         self._session_cache: SessionCache | None = None
@@ -136,25 +138,34 @@ class Explorer:
 
         self._session_count += 1
 
-        locked = self._lock_permanent_files()
-        try:
-            rule, explored = self._run_conversation(
-                context,
-                tools,
-                collection,
-                tracing,
-                rejected_attempts,
-                attempt_number,
-                hint,
-                allow_escalation=allow_escalation,
-            )
-        finally:
-            self._unlock_permanent_files(locked)
+        span_attrs: dict[str, Any] = {
+            "attempt": attempt_number,
+            "collection": collection,
+        }
+        if tracing:
+            span_attrs["error_type"] = tracing.exception_type
+            span_attrs["error_message"] = tracing.exception_message[:200]
 
-        if rule:
-            self._session_cache.store(context, rule)
+        with logfire.span(f"{get_engine_name()} exploration", **span_attrs):
+            locked = self._lock_permanent_files()
+            try:
+                rule, explored = self._run_conversation(
+                    context,
+                    tools,
+                    collection,
+                    tracing,
+                    rejected_attempts,
+                    attempt_number,
+                    hint,
+                    allow_escalation=allow_escalation,
+                )
+            finally:
+                self._unlock_permanent_files(locked)
 
-        return rule, explored
+            if rule:
+                self._session_cache.store(context, rule)
+
+            return rule, explored
 
     def _lock_permanent_files(self) -> dict[Path, int]:
         """Make permanent rule/action files read-only during exploration."""
@@ -249,11 +260,20 @@ class Explorer:
 
         if hint:
             initial_prompt += f"\n\n## Caller Constraints\n\n{hint}"
+
+        # Input guardrails: check prompt before sending to LLM
+        if self._run_input_guardrails(initial_prompt):
+            logger.warning("Input guardrail triggered, aborting exploration")
+            return None, True
+
         messages = [{"role": "user", "content": initial_prompt}]
 
+        gw = self._gateway
         logger.info(
             "Starting LLM conversation",
             session=f"{self._session_count}/{self._session_limit}",
+            gateway=gw.gateway_name if gw else "none",
+            model=gw.model_name if gw else "none",
             prompt_tokens_est=len(initial_prompt) // 4,
             tools=len(all_tools),
         )
@@ -279,6 +299,11 @@ class Explorer:
             allow_escalation=allow_escalation,
             hint=hint,
         )
+
+        # Output guardrails: sanitize LLM responses before they leave the explorer
+        for msg in messages:
+            if msg.get("role") == "assistant" and isinstance(msg.get("content"), str):
+                msg["content"] = self._run_output_guardrails(msg["content"])
 
         # Reset gateway state after conversation ends
         for gw in self._gateways:
@@ -674,6 +699,40 @@ Try a different approach."""
     def _extract_query_text(self, context: dict[str, Any]) -> str:
         return extract_query_text(context)
 
+    def _run_input_guardrails(self, prompt: str) -> bool:
+        """Run input guardrails on prompt. Returns True if any triggered (abort)."""
+        if not self._middleware or not self._middleware.input_guardrails:
+            return False
+
+        ctx: GuardrailContext[None] = GuardrailContext(deps=None, prompt=prompt)
+        for guardrail in self._middleware.input_guardrails:
+            result = asyncio.run(guardrail.validate(prompt, ctx))
+            if result.get("tripwire_triggered"):
+                logger.warning(
+                    "Input guardrail triggered",
+                    guardrail=guardrail.name,
+                    message=result.get("message"),
+                )
+                return True
+        return False
+
+    def _run_output_guardrails(self, text: str) -> str:
+        """Run output guardrails on response text. Returns sanitised text."""
+        if not self._middleware or not self._middleware.output_guardrails:
+            return text
+
+        ctx: GuardrailContext[None] = GuardrailContext(deps=None)
+        for guardrail in self._middleware.output_guardrails:
+            result = asyncio.run(guardrail.validate(text, ctx))
+            if result.get("tripwire_triggered"):
+                logger.warning(
+                    "Output guardrail triggered",
+                    guardrail=guardrail.name,
+                    message=result.get("message"),
+                )
+                text = result.get("sanitized", text)
+        return text
+
     def _run_escalation(
         self,
         prompt: str,
@@ -731,6 +790,25 @@ Try a different approach."""
         can_escalate = allow_escalation and self._secondary_gateway is not None
         caller_tools = make_direct_fix_tools(self._rules_dir) + tools
 
+        with logfire.span(f"{get_engine_name()} run"):
+            return self._run_direct_inner(
+                prompt,
+                tools,
+                caller_tools,
+                budget,
+                can_escalate,
+                escalation_context,
+            )
+
+    def _run_direct_inner(
+        self,
+        prompt: str,
+        tools: list[Callable[..., Any]],
+        caller_tools: list[Callable[..., Any]],
+        budget: dict[str, Any],
+        can_escalate: bool,
+        escalation_context: str | None,
+    ) -> bool:
         # Auto-escalation: skip primary, go straight to secondary
         if escalation_context and self._secondary_gateway is not None:
             logger.info("Auto-escalating to secondary model")

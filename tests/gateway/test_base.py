@@ -5,9 +5,9 @@ import pytest
 from theow._core._tools import GiveUp
 from theow._gateway._base import (
     LLMGateway,
-    SessionState,
     build_tool_declaration,
 )
+from theow._gateway._observability import SessionState
 
 
 class _TestGateway(LLMGateway):

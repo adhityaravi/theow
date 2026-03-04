@@ -13,6 +13,7 @@ COMPONENT_MAP = {
     "theow._gateway._anthropic": "llm-gateway",
     "theow._gateway._gemini": "llm-gateway",
     "theow._gateway._copilot": "llm-gateway",
+    "theow._gateway._pydantic_ai": "llm-gateway",
     "theow._core._explorer": "explorer",
     "theow._core._resolver": "resolver",
     "theow._core._decorators": "recovery",
@@ -42,7 +43,16 @@ def _ensure_configured() -> None:
         return
     _CONFIGURED = True
 
-    for noisy in ("httpx", "httpcore", "anthropic", "chromadb", "asyncio"):
+    for noisy in (
+        "httpx",
+        "httpcore",
+        "urllib3",
+        "anthropic",
+        "chromadb",
+        "asyncio",
+        "opentelemetry",
+        "logfire",
+    ):
         logging.getLogger(noisy).setLevel(logging.ERROR)
 
     # Only configure if host app hasn't set up structlog

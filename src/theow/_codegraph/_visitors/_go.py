@@ -116,9 +116,9 @@ class GoVisitor:
         if receiver_node:
             for ch in receiver_node.children:
                 if ch.type == "parameter_declaration":
-                    type_node = last_child_by_type(
-                        ch, "type_identifier"
-                    ) or last_child_by_type(ch, "pointer_type")
+                    type_node = last_child_by_type(ch, "type_identifier") or last_child_by_type(
+                        ch, "pointer_type"
+                    )
                     if type_node:
                         receiver_type = text(type_node).lstrip("*")
                     break
@@ -148,9 +148,7 @@ class GoVisitor:
                 parent=receiver_id,
             )
         )
-        edges.append(
-            Edge(source=receiver_id, target=method_id, kind="contains", line=start_line)
-        )
+        edges.append(Edge(source=receiver_id, target=method_id, kind="contains", line=start_line))
 
         body = child_by_type(node, "block")
         if body:
