@@ -18,10 +18,10 @@ dependencies = [
     "pyyaml>=6.0",
     "google-genai>=0.3",
     "anthropic>=0.40",
-    "github-copilot-sdk>=0.1",
-    "pydantic-ai>=1.0",
-    "logfire>=3.0",
-    "pydantic-ai-guardrails>=0.1",
+    "github-copilot-sdk>=0.1.30",
+    "pydantic-ai>=1.63",
+    "logfire>=4.25",
+    "pydantic-ai-guardrails>=0.2.2",
     "rich>=13.0",
     "structlog>=24.0",
     "typer>=0.12",
@@ -74,6 +74,9 @@ quote-style = "double"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.logfire]
+ignore_no_config = true
 
 [tool.coverage.report]
 fail_under = 85
