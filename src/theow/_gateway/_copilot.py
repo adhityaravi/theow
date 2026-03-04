@@ -15,8 +15,10 @@ import stat
 from pathlib import Path
 from typing import Any, Callable
 
+from opentelemetry import context as otel_context
+
 import copilot
-from copilot import CopilotClient, Tool
+from copilot import CopilotClient, PermissionHandler, Tool
 from copilot.types import ToolInvocation, ToolResult
 
 from theow._core._logging import get_engine_name, get_logger
@@ -27,8 +29,13 @@ from theow._gateway._base import (
     TEXT_REPLY_NUDGE,
     ConversationResult,
     LLMGateway,
-    SessionState,
     build_tool_declaration,
+)
+from theow._gateway._observability import (
+    CopilotUsageTracker,
+    SessionState,
+    instrumented,
+    span_tool_call,
 )
 
 logger = get_logger(__name__)
@@ -57,12 +64,16 @@ class CopilotGateway(LLMGateway):
         self._gateway_config: dict[str, Any] = {}
         self._max_calls: int = 30
         self._allow_escalation: bool = False
+        self._otel_ctx: Any = None
+        self._usage_unsub: Callable[[], None] | None = None
+        self._usage = CopilotUsageTracker()
         # We use a persistent event loop instead of asyncio.run() because
         # multi-turn conversations (e.g., after RequestTemplates signal) require
         # multiple async calls. asyncio.run() closes the loop after each call,
         # causing loop closed errors on subsequent calls.
         self._loop: asyncio.AbstractEventLoop | None = None
 
+    @instrumented
     def conversation(
         self,
         messages: list[dict[str, Any]],
@@ -75,6 +86,8 @@ class CopilotGateway(LLMGateway):
         self._tool_map = self._build_tool_map(tools)
         self._state = SessionState()
         self._signal = None
+        self._otel_ctx = otel_context.get_current()
+        self._usage._state = self._state
 
         user_prompt = self._get_user_prompt(messages)
         if not user_prompt:
@@ -118,6 +131,10 @@ class CopilotGateway(LLMGateway):
             tokens_used=self._state.tokens_used if self._state else 0,
         )
 
+    def _enrich_span(self, span: Any) -> None:
+        """Called by @instrumented to set Copilot-specific span attributes."""
+        self._usage.enrich_span(span, self.model_name, self.gateway_name)
+
     async def _run_conversation(self, prompt: str) -> str | None:
         """Run async conversation with Copilot.
 
@@ -130,12 +147,18 @@ class CopilotGateway(LLMGateway):
         # Create session only if we don't have one
         if self._session is None:
             copilot_tools = self._build_copilot_tools()
+            # Auto-approve all permission requests. Theow controls the tool
+            # boundary via its own tool registry, so the SDK's permission layer
+            # is redundant. A custom handler could be exposed in the future to
+            # let consumers gate individual tool calls.
             self._session = await self._client.create_session(
                 {
                     "model": self._model,
                     "tools": copilot_tools,
+                    "on_permission_request": PermissionHandler.approve_all,
                 }
             )
+            self._usage_unsub = self._session.on(self._usage.handle_event)
 
         response = await self._session.send_and_wait({"prompt": prompt}, timeout=900)
         if response and hasattr(response, "data") and hasattr(response.data, "content"):
@@ -168,6 +191,20 @@ class CopilotGateway(LLMGateway):
 
     def _handle_tool_call(self, fn: Callable[..., Any], invocation: ToolInvocation) -> ToolResult:
         """Execute tool and return result."""
+        # Restore OTEL context captured in conversation() so tool call spans
+        # are children of the @instrumented conversation span. The copilot SDK's
+        # async loop loses the context when invoking sync tool handlers.
+        token = otel_context.attach(self._otel_ctx) if self._otel_ctx else None
+        try:
+            return self._handle_tool_call_inner(fn, invocation)
+        finally:
+            if token is not None:
+                otel_context.detach(token)
+
+    def _handle_tool_call_inner(
+        self, fn: Callable[..., Any], invocation: ToolInvocation
+    ) -> ToolResult:
+        """Execute tool within restored OTEL context."""
         if self._state:
             self._state.tool_calls += 1
 
@@ -181,15 +218,9 @@ class CopilotGateway(LLMGateway):
         # session.abort() is async but the event loop is already running (we're inside
         # send_and_wait), so schedule it via ensure_future. It fires after this handler
         # returns, stopping the loop. conversation() then raises the stored signal.
-        if self._state and (
-            self._state.tool_calls > self._max_calls
-            or (self._max_tokens > 0 and self._state.tokens_used > self._max_tokens)
+        if self._state and self.check_budget_exceeded(
+            self._state, self._max_calls, self._max_tokens
         ):
-            logger.warning(
-                "Budget exceeded, aborting SDK loop",
-                tool_calls=self._state.tool_calls,
-                tokens_used=self._state.tokens_used,
-            )
             self._signal = GiveUp("Session budget exceeded")
             if self._session:
                 asyncio.ensure_future(self._session.abort())
@@ -206,52 +237,46 @@ class CopilotGateway(LLMGateway):
             else None
         )
 
-        # Estimate input tokens from args
-        if self._state:
-            self._state.tokens_used += len(json.dumps(args)) // 4
-
-        try:
-            result = fn(**args)
-            text_result = json.dumps(result) if not isinstance(result, str) else result
-            # Estimate output tokens from result
-            if self._state:
-                self._state.tokens_used += len(text_result) // 4
-            if warning:
-                text_result = f"{text_result}\n\n{warning}"
-            return ToolResult(textResultForLlm=text_result)
-        except RequestTemplates:
-            # SDK agentic loop doesn't support mid-turn interrupts, return templates inline
-            rules_dir = self._gateway_config.get("rules_dir")
-            if rules_dir:
-                actions_dir = rules_dir.parent / "actions"
-                templates = TEMPLATES.format(rules_dir=rules_dir, actions_dir=actions_dir)
-                # Reinforce guidelines since SDK context can drift
-                reminder = (
-                    "\n\n---\n"
-                    "REMINDER - Follow guidelines from the initial prompt:\n"
-                    "- Verify patterns against ACTUAL field values from the error context\n"
-                    "- Least invasive fix - prefer config over code changes\n"
-                    "- NEVER hardcode case-specific values\n"
-                    "- Write GENERIC solutions that handle all similar cases"
+        with span_tool_call(tool_name, self._state):
+            try:
+                result = fn(**args)
+                text_result = json.dumps(result) if not isinstance(result, str) else result
+                if warning:
+                    text_result = f"{text_result}\n\n{warning}"
+                return ToolResult(textResultForLlm=text_result)
+            except RequestTemplates:
+                # SDK agentic loop doesn't support mid-turn interrupts, return templates inline
+                rules_dir = self._gateway_config.get("rules_dir")
+                if rules_dir:
+                    actions_dir = rules_dir.parent / "actions"
+                    templates = TEMPLATES.format(rules_dir=rules_dir, actions_dir=actions_dir)
+                    # Reinforce guidelines since SDK context can drift
+                    reminder = (
+                        "\n\n---\n"
+                        "REMINDER - Follow guidelines from the initial prompt:\n"
+                        "- Verify patterns against ACTUAL field values from the error context\n"
+                        "- Least invasive fix - prefer config over code changes\n"
+                        "- NEVER hardcode case-specific values\n"
+                        "- Write GENERIC solutions that handle all similar cases"
+                    )
+                    return ToolResult(textResultForLlm=templates + reminder)
+                # Fallback if config not set
+                self._signal = RequestTemplates()
+                return ToolResult(
+                    textResultForLlm="Signal: RequestTemplates",
+                    resultType="failure",
                 )
-                return ToolResult(textResultForLlm=templates + reminder)
-            # Fallback if config not set
-            self._signal = RequestTemplates()
-            return ToolResult(
-                textResultForLlm="Signal: RequestTemplates",
-                resultType="failure",
-            )
-        except ExplorationSignal as sig:
-            self._signal = sig
-            if self._session:
-                asyncio.ensure_future(self._session.abort())
-            return ToolResult(
-                textResultForLlm=f"Signal: {type(sig).__name__}",
-                resultType="failure",
-            )
-        except Exception as e:
-            logger.warning("Tool execution failed", tool=tool_name, error=str(e))
-            return ToolResult(textResultForLlm=str(e), resultType="failure")
+            except ExplorationSignal as sig:
+                self._signal = sig
+                if self._session:
+                    asyncio.ensure_future(self._session.abort())
+                return ToolResult(
+                    textResultForLlm=f"Signal: {type(sig).__name__}",
+                    resultType="failure",
+                )
+            except Exception as e:
+                logger.warning("Tool execution failed", tool=tool_name, error=str(e))
+                return ToolResult(textResultForLlm=str(e), resultType="failure")
 
     def _get_user_prompt(self, messages: list[dict[str, Any]]) -> str | None:
         """Extract last user message content."""
@@ -265,6 +290,10 @@ class CopilotGateway(LLMGateway):
 
     def reset(self) -> None:
         """Clean up client resources."""
+        if self._usage_unsub:
+            self._usage_unsub()
+            self._usage_unsub = None
+        self._usage.reset()
         if self._session and self._loop and not self._loop.is_closed():
             try:
                 self._loop.run_until_complete(self._session.destroy())
@@ -286,6 +315,7 @@ class CopilotGateway(LLMGateway):
         self._signal = None
         self._tool_map = {}
 
+    @instrumented
     def generate(
         self,
         prompt: str,
@@ -304,7 +334,12 @@ class CopilotGateway(LLMGateway):
     ) -> dict[str, Any]:
         """Async single generation."""
         client = CopilotClient()
-        session = await client.create_session({"model": self._model})
+        session = await client.create_session(
+            {
+                "model": self._model,
+                "on_permission_request": PermissionHandler.approve_all,
+            }
+        )
 
         try:
             if schema:

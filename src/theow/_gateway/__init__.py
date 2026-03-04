@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import warnings
 
+from theow._core._logging import get_logger
 from theow._gateway._anthropic import AnthropicGateway
 from theow._gateway._base import GatewayProvider, LLMGateway
 from theow._gateway._copilot import CopilotGateway
 from theow._gateway._gemini import GeminiGateway
 from theow._gateway._pydantic_ai import PydanticAIGateway
+
+logger = get_logger(__name__)
 
 # Native gateway class registry
 NATIVE_GATEWAYS: dict[str, type[LLMGateway]] = {
@@ -47,6 +50,10 @@ def create_gateway(
         native_cls = NATIVE_GATEWAYS.get(gateway_provider)
         if native_cls is None:
             raise ValueError(f"No native gateway for: {gateway_provider}")
+        logger.warning(
+            "Native gateway is deprecated, use GatewayProvider.PYDANTIC",
+            gateway=gateway_provider,
+        )
         warnings.warn(
             f"Native {gateway_provider} gateway is deprecated. "
             "Use GatewayProvider.PYDANTIC instead.",

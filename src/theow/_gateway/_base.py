@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from theow._core._logging import get_logger
 from theow._core._tools import ExplorationSignal
+from theow._gateway._observability import SessionState
 
 logger = get_logger(__name__)
 
@@ -19,14 +20,6 @@ class GatewayProvider(str, Enum):
 
     PYDANTIC = "pydantic"
     NATIVE = "native"
-
-
-@dataclass
-class LogfireConfig:
-    """Configuration for Logfire/OpenTelemetry instrumentation."""
-
-    enabled: bool = False
-    send_to_logfire: bool = True  # False = OTel-only via OTEL_* env vars
 
 
 @dataclass
@@ -123,15 +116,6 @@ class ConversationResult:
     tokens_used: int = 0
 
 
-@dataclass
-class SessionState:
-    """Tracks mutable state across the tool-calling loop."""
-
-    tool_calls: int = 0
-    tokens_used: int = 0
-    warned_about_budget: bool = False
-
-
 class LLMGateway(ABC):
     """Abstract base for LLM provider implementations."""
 
@@ -158,6 +142,28 @@ class LLMGateway(ABC):
         """Single generation, optionally with structured output."""
         ...
 
+    @property
+    def model_name(self) -> str:
+        """Human-readable model identifier (without provider prefix)."""
+        raw = getattr(self, "_model", "unknown")
+        # PydanticAI format "provider:model" → strip prefix
+        return raw.split(":", 1)[-1] if ":" in raw else raw
+
+    @property
+    def gateway_name(self) -> str:
+        """Short gateway identifier for logging."""
+        cls = type(self).__name__
+        return cls.replace("Gateway", "").lower()
+
+    @property
+    def provider_name(self) -> str:
+        """Provider name for OTEL gen_ai.system attribute.
+
+        Defaults to gateway_name. Override when the gateway wraps
+        multiple providers (e.g., PydanticAI).
+        """
+        return self.gateway_name
+
     def reset(self) -> None:
         """Reset gateway state after conversation ends.
 
@@ -183,7 +189,7 @@ class LLMGateway(ABC):
 
         Warns at 80% of whichever session limit (tool calls or tokens) hits first.
         Returns warning message if at soft limit, None otherwise.
-        Sets state.warned_about_budget to prevent duplicate warnings.
+        Sets state.warned_about_budget to prevent duplicate warning.
         """
         if state.warned_about_budget:
             return None
@@ -227,6 +233,31 @@ class LLMGateway(ABC):
             )
 
         return msg
+
+    def check_budget_exceeded(
+        self,
+        state: SessionState,
+        max_calls: int,
+        max_tokens: int = 0,
+    ) -> bool:
+        """Check if session budget (tool calls or tokens) has been exceeded.
+
+        Logs a warning on first detection. Returns True if budget is blown.
+        """
+        calls_over = state.tool_calls > max_calls
+        tokens_over = max_tokens > 0 and state.tokens_used > max_tokens
+
+        if not calls_over and not tokens_over:
+            return False
+
+        logger.warning(
+            "Session budget exceeded",
+            tool_calls=state.tool_calls,
+            max_calls=max_calls,
+            tokens_used=state.tokens_used,
+            max_tokens=max_tokens,
+        )
+        return True
 
     def _build_tool_map(self, tools: list[Callable[..., Any]]) -> dict[str, Callable[..., Any]]:
         """Create name → function mapping from tools list."""

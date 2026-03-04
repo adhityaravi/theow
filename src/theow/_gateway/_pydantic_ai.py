@@ -24,15 +24,15 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
 from theow._core._logging import get_engine_name, get_logger
-from theow._core._tools import ExplorationSignal
+from theow._core._tools import ExplorationSignal, GiveUp
 from theow._gateway._base import (
     MAX_TEXT_NUDGES,
     TEXT_REPLY_NUDGE,
     ConversationResult,
     LLMGateway,
-    SessionState,
     build_tool_declaration,
 )
+from theow._gateway._observability import SessionState, instrumented, span_tool_call
 
 logger = get_logger(__name__)
 
@@ -51,7 +51,14 @@ class PydanticAIGateway(LLMGateway):
 
     def __init__(self, model: str = "anthropic:claude-sonnet-4-20250514") -> None:
         self._model = model
+        self._state: SessionState | None = None
 
+    @property
+    def provider_name(self) -> str:
+        """Extract actual provider from PydanticAI model spec (e.g. 'anthropic:model' → 'anthropic')."""
+        return self._model.split(":", 1)[0] if ":" in self._model else self.gateway_name
+
+    @instrumented
     def conversation(
         self,
         messages: list[dict[str, Any]],
@@ -74,7 +81,7 @@ class PydanticAIGateway(LLMGateway):
         )
         model_settings = ModelSettings(max_tokens=_PER_RESPONSE_TOKENS)
 
-        state = SessionState()
+        self._state = state = SessionState()
         text_nudges = 0
 
         # Build PydanticAI message history from theow messages
@@ -85,6 +92,11 @@ class PydanticAIGateway(LLMGateway):
         ):
             response = self._call_model(pai_messages, model_settings, request_params, state)
             if response is None:
+                break
+
+            # Hard cutoff right after model response updates token count
+            if self.check_budget_exceeded(state, max_calls, max_tokens):
+                pai_messages.append(response)
                 break
 
             # Append model response to PydanticAI history
@@ -114,6 +126,11 @@ class PydanticAIGateway(LLMGateway):
         # Sync back to theow message format
         self._sync_messages(messages, pai_messages)
 
+        # Budget exceeded → raise signal so @instrumented records the exception
+        # and the explorer gets an explicit GiveUp instead of None
+        if state.tool_calls > max_calls or (max_tokens > 0 and state.tokens_used > max_tokens):
+            raise GiveUp("Session budget exceeded")
+
         return ConversationResult(
             messages=messages,
             tool_calls=state.tool_calls,
@@ -130,7 +147,7 @@ class PydanticAIGateway(LLMGateway):
         """Send conversation to model via PydanticAI, update token count."""
         logger.debug(
             f"{get_engine_name()} --> LLM",
-            provider="pydantic-ai",
+            provider=self._model.split(":")[0],
             turn=state.tool_calls,
             model=self._model,
         )
@@ -147,9 +164,11 @@ class PydanticAIGateway(LLMGateway):
 
         # Track token usage
         if response.usage:
-            state.tokens_used += (response.usage.request_tokens or 0) + (
-                response.usage.response_tokens or 0
-            )
+            inp = response.usage.request_tokens or 0
+            out = response.usage.response_tokens or 0
+            state.input_tokens += inp
+            state.output_tokens += out
+            state.tokens_used = state.input_tokens + state.output_tokens
 
         tool_names = [tc.tool_name for tc in response.tool_calls]
         output_tokens = response.usage.response_tokens if response.usage else 0
@@ -184,27 +203,28 @@ class PydanticAIGateway(LLMGateway):
                 continue
 
             args = tc.args if isinstance(tc.args, dict) else {}
-            try:
-                result, is_error = self._execute_tool(tc.tool_name, args, tool_map)
-                content = json.dumps(result) if not isinstance(result, str) else result
-                if is_error:
-                    content = json.dumps(result) if isinstance(result, dict) else str(result)
-                tool_returns.append(
-                    ToolReturnPart(
-                        tool_name=tc.tool_name,
-                        content=content,
-                        tool_call_id=tc.tool_call_id,
+            with span_tool_call(tc.tool_name, state):
+                try:
+                    result, is_error = self._execute_tool(tc.tool_name, args, tool_map)
+                    content = json.dumps(result) if not isinstance(result, str) else result
+                    if is_error:
+                        content = json.dumps(result) if isinstance(result, dict) else str(result)
+                    tool_returns.append(
+                        ToolReturnPart(
+                            tool_name=tc.tool_name,
+                            content=content,
+                            tool_call_id=tc.tool_call_id,
+                        )
                     )
-                )
-            except ExplorationSignal as sig:
-                tool_returns.append(
-                    ToolReturnPart(
-                        tool_name=tc.tool_name,
-                        content=f"Signal: {type(sig).__name__}",
-                        tool_call_id=tc.tool_call_id,
+                except ExplorationSignal as sig:
+                    tool_returns.append(
+                        ToolReturnPart(
+                            tool_name=tc.tool_name,
+                            content=f"Signal: {type(sig).__name__}",
+                            tool_call_id=tc.tool_call_id,
+                        )
                     )
-                )
-                signal_to_raise = sig
+                    signal_to_raise = sig
 
         tool_return_msg = ModelRequest(parts=tool_returns)
 
@@ -213,6 +233,7 @@ class PydanticAIGateway(LLMGateway):
 
         return tool_return_msg
 
+    @instrumented
     def generate(
         self,
         prompt: str,

@@ -1,3 +1,4 @@
+# DEPRECATED: This gateway is deprecated. Use PydanticAIGateway instead.
 """Anthropic LLM gateway implementation.
 
 Anthropic gateway currently follows a Theow native approach for conversation.
