@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
@@ -20,6 +20,19 @@ class GatewayProvider(str, Enum):
 
     PYDANTIC = "pydantic"
     NATIVE = "native"
+
+
+@dataclass
+class GatewayConfig:
+    """Backend selection and gateway-specific options.
+
+    ``options`` holds keys understood only by certain gateways (e.g. the
+    Claude Agent SDK accepts ``effort``, ``thinking``, ``max_thinking_tokens``).
+    Unknown keys are silently ignored by gateways that don't use them.
+    """
+
+    provider: GatewayProvider = GatewayProvider.PYDANTIC
+    options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

@@ -52,6 +52,8 @@ def _ensure_configured() -> None:
         "asyncio",
         "opentelemetry",
         "logfire",
+        "mcp",
+        "claude_agent_sdk",
     ):
         logging.getLogger(noisy).setLevel(logging.ERROR)
 
