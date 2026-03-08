@@ -6,8 +6,7 @@ import warnings
 
 from theow._core._logging import get_logger
 from theow._gateway._anthropic import AnthropicGateway
-from theow._gateway._base import GatewayProvider, LLMGateway
-from theow._gateway._copilot import CopilotGateway
+from theow._gateway._base import GatewayConfig, GatewayProvider, LLMGateway
 from theow._gateway._gemini import GeminiGateway
 from theow._gateway._pydantic_ai import PydanticAIGateway
 
@@ -27,26 +26,33 @@ _PROVIDER_ALIASES: dict[str, str] = {
 
 def create_gateway(
     llm_spec: str,
-    provider: GatewayProvider = GatewayProvider.PYDANTIC,
+    config: GatewayConfig | None = None,
 ) -> LLMGateway:
     """Create gateway from provider/model spec (e.g., 'anthropic/claude-sonnet-4').
 
     Args:
         llm_spec: Provider/model string like ``"anthropic/claude-opus-4-6"``.
-        provider: Which backend to use.  ``PYDANTIC`` (default) routes through
-            :class:`PydanticAIGateway`; ``NATIVE`` routes to the original
-            per-provider gateway classes.
+        config: Gateway backend selection and gateway-specific options.
 
     Any PydanticAI-supported provider works out of the box when using PYDANTIC:
     ``"openai/gpt-5"``, ``"github/openai/gpt-5"``, ``"bedrock/..."``, etc.
     """
+    cfg = config or GatewayConfig()
     gateway_provider, model = llm_spec.split("/", 1)
 
     # Copilot always uses native SDK — PydanticAI doesn't support the Copilot protocol
     if gateway_provider == "copilot":
+        from theow._gateway._copilot import CopilotGateway
+
         return CopilotGateway(model=model)
 
-    if provider == GatewayProvider.NATIVE:
+    # Claude Agent SDK — always uses native SDK
+    if gateway_provider in ("claude-agent", "claude_agent"):
+        from theow._gateway._claude_agent import ClaudeAgentGateway
+
+        return ClaudeAgentGateway(model=model, _gateway_options=cfg.options)
+
+    if cfg.provider == GatewayProvider.NATIVE:
         native_cls = NATIVE_GATEWAYS.get(gateway_provider)
         if native_cls is None:
             raise ValueError(f"No native gateway for: {gateway_provider}")

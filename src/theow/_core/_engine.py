@@ -23,7 +23,7 @@ from pydantic_ai_guardrails.guardrails.input import prompt_injection
 from pydantic_ai_guardrails.guardrails.output import secret_redaction
 
 from theow._gateway import LLMGateway, create_gateway
-from theow._gateway._base import GatewayProvider, MiddlewareConfig
+from theow._gateway._base import GatewayConfig, MiddlewareConfig
 from theow._gateway._observability import LogfireConfig, configure_logfire
 
 logger = get_logger(__name__)
@@ -45,7 +45,7 @@ class Theow:
         max_tool_calls_per_session: int = 30,
         max_tokens_per_session: int = 8192,
         archive_llm_attempt: bool = False,
-        _gateway_provider: GatewayProvider = GatewayProvider.PYDANTIC,
+        _gateway_config: GatewayConfig | None = None,
         logfire: bool | LogfireConfig = False,
         middleware: bool | MiddlewareConfig = False,
     ) -> None:
@@ -59,7 +59,7 @@ class Theow:
         self._max_tool_calls_per_session = max_tool_calls_per_session
         self._max_tokens_per_session = max_tokens_per_session
         self._archive_llm_attempt = archive_llm_attempt
-        self._gateway_provider = _gateway_provider
+        self._gateway_config = _gateway_config or GatewayConfig()
 
         self._gateway: LLMGateway | None = None
         self._secondary_gateway: LLMGateway | None = None
@@ -248,12 +248,12 @@ class Theow:
             logger.warning("Exploration disabled", reason="no LLM configured")
             return
 
-        self._gateway = create_gateway(self._llm, provider=self._gateway_provider)
+        self._gateway = create_gateway(self._llm, config=self._gateway_config)
         self._explorer.set_gateway(self._gateway)
 
         if self._llm_secondary:
             self._secondary_gateway = create_gateway(
-                self._llm_secondary, provider=self._gateway_provider
+                self._llm_secondary, config=self._gateway_config
             )
             self._explorer.set_secondary_gateway(self._secondary_gateway)
 

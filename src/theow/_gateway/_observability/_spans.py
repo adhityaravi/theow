@@ -9,6 +9,8 @@ from typing import Any, Callable, cast
 
 import logfire
 
+from theow._core._tools import ExplorationSignal
+
 
 @dataclass
 class SessionState:
@@ -33,12 +35,17 @@ def instrumented[F: Callable[..., Any]](fn: F) -> F:
     def wrapper(self, *args, **kwargs):
         op = "chat" if fn.__name__ == "conversation" else fn.__name__
         name = f"LLM {fn.__name__}"
+        signal: ExplorationSignal | None = None
         with logfire.span("LLM {op}", _span_name=name, op=op) as span:
             span.set_attribute("gen_ai.operation.name", op)
             span.set_attribute("gen_ai.request.model", self.model_name)
             span.set_attribute("gen_ai.system", self.provider_name)
             try:
                 return fn(self, *args, **kwargs)
+            except ExplorationSignal as exc:
+                # Done / GiveUp are control flow, not errors — capture and
+                # re-raise after the span closes so logfire sees OK status.
+                signal = exc
             finally:
                 state = getattr(self, "_state", None)
                 if state:
@@ -49,6 +56,9 @@ def instrumented[F: Callable[..., Any]](fn: F) -> F:
                 enrich = getattr(self, "_enrich_span", None)
                 if enrich:
                     enrich(span)
+        # Re-raise outside the span context so logfire doesn't see it
+        if signal is not None:
+            raise signal
 
     return cast(F, wrapper)
 

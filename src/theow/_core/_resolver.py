@@ -109,17 +109,24 @@ class Resolver:
         return rule.bind(captures, context, self._action_registry)
 
     def _find_by_tags(self, collection: str, tags: list[str]) -> list[str]:
-        """Find rule names matching any of the given tags."""
-        # Load all rules and filter by tags
+        """Find rule names matching any of the given tags.
+
+        Deterministic rules are returned before probabilistic (LLM) rules
+        so they get tried first.
+        """
         all_rules = self._chroma.list_rules(collection)
-        matching = []
+        deterministic: list[str] = []
+        probabilistic: list[str] = []
 
         for rule_name in all_rules:
             rule = self._load_rule(rule_name, collection)
             if rule and any(tag in rule.tags for tag in tags):
-                matching.append(rule_name)
+                if rule.type == "deterministic":
+                    deterministic.append(rule_name)
+                else:
+                    probabilistic.append(rule_name)
 
-        return matching
+        return deterministic + probabilistic
 
     def _vector_search(
         self,
