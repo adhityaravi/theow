@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/adhityaravi/theow/compare/theow-v0.1.0...theow-v0.2.0) (2026-03-08)
+
+
+### Features
+
+* **gateway:** adds a claude agent sdk gateway ([#29](https://github.com/adhityaravi/theow/issues/29)) ([c0d8709](https://github.com/adhityaravi/theow/commit/c0d8709bdb94daa0430436579eab4be28a4c9173))
+
 ## [0.1.0](https://github.com/adhityaravi/theow/compare/theow-v0.0.22...theow-v0.1.0) (2026-03-04)
 
 
