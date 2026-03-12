@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/adhityaravi/theow/compare/theow-v0.2.0...theow-v0.2.1) (2026-03-12)
+
+
+### Features
+
+* adds args to tool call traces ([0d0d735](https://github.com/adhityaravi/theow/commit/0d0d7354a6f47c9be92a4c4d3e285bb91e7fe031))
+
 ## [0.2.0](https://github.com/adhityaravi/theow/compare/theow-v0.1.0...theow-v0.2.0) (2026-03-08)
 
 
