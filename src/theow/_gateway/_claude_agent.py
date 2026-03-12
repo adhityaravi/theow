@@ -339,7 +339,7 @@ class ClaudeAgentGateway(LLMGateway):
             else None
         )
 
-        with span_tool_call(tool_name, self._state):
+        with span_tool_call(tool_name, self._state, args=args):
             try:
                 result = fn(**args)
                 text_result = json.dumps(result) if not isinstance(result, str) else result

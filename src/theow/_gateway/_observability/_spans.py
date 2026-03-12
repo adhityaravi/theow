@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, cast
@@ -64,11 +65,17 @@ def instrumented[F: Callable[..., Any]](fn: F) -> F:
 
 
 @contextmanager
-def span_tool_call(tool_name: str, state: SessionState | None = None):
+def span_tool_call(
+    tool_name: str,
+    state: SessionState | None = None,
+    args: dict[str, Any] | None = None,
+):
     """Logfire span for an individual tool call."""
     with logfire.span(
         "tool call: {tool_name}", _span_name="tool call", tool_name=tool_name
     ) as span:
+        if args:
+            span.set_attribute("tool.arguments", json.dumps(args))
         yield
         if state:
             span.set_attribute("gen_ai.usage.input_tokens", state.input_tokens)

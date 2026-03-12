@@ -203,7 +203,7 @@ class PydanticAIGateway(LLMGateway):
                 continue
 
             args = tc.args if isinstance(tc.args, dict) else {}
-            with span_tool_call(tc.tool_name, state):
+            with span_tool_call(tc.tool_name, state, args=args):
                 try:
                     result, is_error = self._execute_tool(tc.tool_name, args, tool_map)
                     content = json.dumps(result) if not isinstance(result, str) else result
